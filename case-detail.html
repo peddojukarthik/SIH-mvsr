@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NEMESIS — Case Details</title>
+<title>Case Details</title>
 <style>
 body{font-family:system-ui;max-width:1050px;margin:25px auto;padding:0 18px;background:#f8fafc;color:#172033}.card{background:#fff;border:1px solid #dbe2ea;border-radius:14px;padding:20px;margin:14px 0}.top{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}.tabs{display:flex;gap:10px;flex-wrap:wrap}.tabs button{flex:1;min-width:160px}button{border:0;border-radius:8px;padding:10px 14px;background:#2563eb;color:#fff;cursor:pointer;margin:4px 0}.gray{background:#475569}.green{background:#047857}.danger{background:#b91c1c}input,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #cbd5e1;border-radius:8px;margin:6px 0 10px}.file,.member,.result{padding:14px 0;border-bottom:1px solid #e5e7eb}.meta{color:#64748b;font-size:.86rem}.hash{font-family:monospace;font-size:.72rem;word-break:break-all;background:#f1f5f9;padding:8px;border-radius:6px;margin:6px 0}.status{padding:10px;border-radius:8px;margin-top:8px;white-space:pre-wrap}.error{background:#fef2f2;color:#991b1b}.success{background:#ecfdf5;color:#065f46}.warn{background:#fffbeb;color:#92400e}.checks{display:grid;grid-template-columns:1fr 1fr;gap:7px}.check{padding:8px;background:#f8fafc;border-radius:7px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media(max-width:700px){.grid{grid-template-columns:1fr}}.badge{display:inline-block;padding:3px 8px;border-radius:99px;background:#e2e8f0;font-size:.75rem}.latest{font-weight:700}.section-title{margin-top:26px}
 a{color:#2563eb}
@@ -15,7 +15,7 @@ a{color:#2563eb}
 <div id="panel"></div>
 <div id="otpModal" style="display:none;position:fixed;inset:0;background:#0008;align-items:center;justify-content:center"><div class="card" style="width:min(520px,92vw)"><h2>Email verification</h2><p id="otpStatus">A 6-digit code will be sent to your official email.</p><input id="otpCode" maxlength="6" inputmode="numeric" placeholder="6-digit code"><button id="verifyOtpBtn">Verify</button><button class="gray" id="cancelOtpBtn">Cancel</button></div></div>
 <script>
-const API="http://127.0.0.1:8000"; const token=sessionStorage.getItem("token"); const H={"Authorization":"Bearer "+token};
+const API="https://alliance-cqnf.onrender.com"; const token=sessionStorage.getItem("token"); const H={"Authorization":"Bearer "+token};
 const caseId=new URLSearchParams(location.search).get("case_id"); const panel=document.getElementById("panel");
 if(!token) location.href="login.html"; if(!caseId) location.href="homepage.html"; document.getElementById("caseIdText").textContent=caseId;
 function esc(v){return String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]))}
