@@ -1,53 +1,394 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Case Details</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NEMESIS — Case Details</title>
 <style>
-body{font-family:system-ui;max-width:1050px;margin:25px auto;padding:0 18px;background:#f8fafc;color:#172033}.card{background:#fff;border:1px solid #dbe2ea;border-radius:14px;padding:20px;margin:14px 0}.top{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}.tabs{display:flex;gap:10px;flex-wrap:wrap}.tabs button{flex:1;min-width:160px}button{border:0;border-radius:8px;padding:10px 14px;background:#2563eb;color:#fff;cursor:pointer;margin:4px 0}.gray{background:#475569}.green{background:#047857}.danger{background:#b91c1c}input,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #cbd5e1;border-radius:8px;margin:6px 0 10px}.file,.member,.result{padding:14px 0;border-bottom:1px solid #e5e7eb}.meta{color:#64748b;font-size:.86rem}.hash{font-family:monospace;font-size:.72rem;word-break:break-all;background:#f1f5f9;padding:8px;border-radius:6px;margin:6px 0}.status{padding:10px;border-radius:8px;margin-top:8px;white-space:pre-wrap}.error{background:#fef2f2;color:#991b1b}.success{background:#ecfdf5;color:#065f46}.warn{background:#fffbeb;color:#92400e}.checks{display:grid;grid-template-columns:1fr 1fr;gap:7px}.check{padding:8px;background:#f8fafc;border-radius:7px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media(max-width:700px){.grid{grid-template-columns:1fr}}.badge{display:inline-block;padding:3px 8px;border-radius:99px;background:#e2e8f0;font-size:.75rem}.latest{font-weight:700}.section-title{margin-top:26px}
-a{color:#2563eb}
+body{font-family:system-ui,sans-serif;max-width:1050px;margin:25px auto;padding:0 18px;background:#f8fafc;color:#172033}
+.card{background:#fff;border:1px solid #dbe2ea;border-radius:14px;padding:20px;margin:14px 0}
+.top{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center}
+.tabs{display:flex;gap:10px;flex-wrap:wrap}.tabs button{flex:1;min-width:160px}
+button{border:0;border-radius:8px;padding:10px 14px;background:#2563eb;color:#fff;cursor:pointer;margin:4px 0}
+button:disabled{opacity:.6;cursor:not-allowed}.gray{background:#475569}.green{background:#047857}.danger{background:#b91c1c}
+input,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #cbd5e1;border-radius:8px;margin:6px 0 10px}
+.file,.member,.result{padding:14px 0;border-bottom:1px solid #e5e7eb}.meta{color:#64748b;font-size:.86rem}
+.status{padding:10px;border-radius:8px;margin-top:8px;white-space:pre-wrap}.error{background:#fef2f2;color:#991b1b}.success{background:#ecfdf5;color:#065f46}.warn{background:#fffbeb;color:#92400e}
+.checks{display:grid;grid-template-columns:1fr 1fr;gap:7px}.check{padding:8px;background:#f8fafc;border-radius:7px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media(max-width:700px){.grid{grid-template-columns:1fr}}
+.badge{display:inline-block;padding:3px 8px;border-radius:99px;background:#e2e8f0;font-size:.75rem}.latest{font-weight:700}
+a{color:#2563eb}.integrity{padding:12px;background:#f1f5f9;border-radius:10px;margin-top:10px}
 </style>
 </head>
 <body>
 <a href="homepage.html">← Back to homepage</a>
-<div class="card"><div class="top"><div><h1 id="title">Case</h1><div class="meta" id="caseIdText"></div></div><div><button class="green" id="merkleBuildBtn">Build Integrity Snapshot</button><button class="gray" id="merkleVerifyBtn">Verify Merkle</button></div></div>
-<div class="tabs"><button id="filesBtn">📁 Files</button><button id="uploadBtn">⬆ Upload</button><button id="membersBtn">👥 Members</button></div></div>
+
+<div class="card">
+  <div class="top">
+    <div>
+      <h1 id="title">Case</h1>
+      <div class="meta">Case details are protected</div>
+    </div>
+    <div>
+      <button class="green" id="merkleBuildBtn">Build Integrity Snapshot</button>
+      <button class="gray" id="merkleVerifyBtn">Verify Merkle</button>
+    </div>
+  </div>
+  <div class="tabs">
+    <button id="filesBtn">📁 Files</button>
+    <button id="uploadBtn">⬆ Upload</button>
+    <button id="membersBtn">👥 Members</button>
+  </div>
+  <div id="integrityStatus"></div>
+</div>
+
 <div id="panel"></div>
-<div id="otpModal" style="display:none;position:fixed;inset:0;background:#0008;align-items:center;justify-content:center"><div class="card" style="width:min(520px,92vw)"><h2>Email verification</h2><p id="otpStatus">A 6-digit code will be sent to your official email.</p><input id="otpCode" maxlength="6" inputmode="numeric" placeholder="6-digit code"><button id="verifyOtpBtn">Verify</button><button class="gray" id="cancelOtpBtn">Cancel</button></div></div>
+
+<div id="otpModal" style="display:none;position:fixed;inset:0;background:#0008;align-items:center;justify-content:center;z-index:10">
+  <div class="card" style="width:min(520px,92vw)">
+    <h2>Email verification</h2>
+    <p id="otpStatus">A 6-digit code will be sent to your official email.</p>
+    <input id="otpCode" maxlength="6" inputmode="numeric" placeholder="6-digit code" autocomplete="one-time-code">
+    <button id="verifyOtpBtn">Verify</button>
+    <button class="gray" id="cancelOtpBtn">Cancel</button>
+  </div>
+</div>
+
 <script>
-const API="https://alliance-cqnf.onrender.com"; const token=sessionStorage.getItem("token"); const H={"Authorization":"Bearer "+token};
-const caseId=new URLSearchParams(location.search).get("case_id"); const panel=document.getElementById("panel");
-if(!token) location.href="login.html"; if(!caseId) location.href="homepage.html"; document.getElementById("caseIdText").textContent=caseId;
-function esc(v){return String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]))}
-function errText(d){if(typeof d?.detail==="string")return d.detail;if(Array.isArray(d?.detail))return d.detail.map(x=>(x.loc||[]).join(".")+": "+x.msg).join("; ");return d?.message||JSON.stringify(d)}
-async function api(path,opt={}){let r=await fetch(API+path,{...opt,headers:{...(opt.headers||{}),...H}});let raw=await r.text(),d={};try{d=raw?JSON.parse(raw):{}}catch{d={detail:raw}}if(!r.ok)throw Error(errText(d));return d}
-async function elevateForSensitive(action){
-  const modal=document.getElementById("otpModal"),status=document.getElementById("otpStatus"),code=document.getElementById("otpCode"); modal.style.display="flex";status.textContent="Requesting email verification...";
-  try{await api("/request-email-otp",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({purpose:action})});status.textContent="Enter the 6-digit code sent to your official email.";
-    return await new Promise((resolve,reject)=>{document.getElementById("verifyOtpBtn").onclick=async()=>{try{await api("/verify-email-otp",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code:code.value,purpose:action})});modal.style.display="none";resolve(true)}catch(e){status.textContent=e.message}};document.getElementById("cancelOtpBtn").onclick=()=>{modal.style.display="none";reject(Error("Cancelled"))}})
-  }catch(e){modal.style.display="none";throw e}
+// Production uses Render. Local development still uses the local FastAPI server.
+const API = (location.hostname === "localhost" || location.hostname === "127.0.0.1")
+  ? "http://127.0.0.1:8000"
+  : "https://alliance-cqnf.onrender.com";
+
+const token = sessionStorage.getItem("token");
+const H = {"Authorization":"Bearer " + token};
+const caseId = new URLSearchParams(location.search).get("case_id");
+const panel = document.getElementById("panel");
+const integrityStatus = document.getElementById("integrityStatus");
+
+if(!token) location.href="login.html";
+if(!caseId) location.href="homepage.html";
+
+function esc(v){
+  return String(v ?? "").replace(/[&<>"']/g,c=>({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;", "'":"&#039;"
+  }[c]));
 }
-async function showFiles(){try{let d=await api("/case/documents?case_id="+encodeURIComponent(caseId));let html='<div class="card"><h2>Case Documents</h2>';
- if(!d.documents.length)html+='<p class="meta">No documents uploaded yet.</p>';
- for(const x of d.documents){const v=x.version||{};html+=`<div class="file"><div><span class="badge">${esc(x.document_type)}</span> <span class="latest">Version ${esc(v.version_number||1)}</span></div><div><b>${esc(x.filename)}</b></div><div class="meta">Uploaded: ${esc(v.timestamp||"")}</div><div class="hash">SHA-256: ${esc(v.file_hash||"")}</div><button data-versions="${esc(x.document_id)}">Version history</button><button class="gray" data-verify="${esc(v.version_id||"")}">Verify integrity</button><button class="green" data-open="${esc(v.version_id||"")}">Secure view</button><div id="history-${esc(x.document_id)}"></div></div>`}
- html+='</div>';panel.innerHTML=html;
- panel.querySelectorAll('[data-open]').forEach(b=>b.onclick=async()=>{try{let d=await api('/documents/file/'+b.dataset.open);window.open(d.url,'_blank')}catch(e){alert(e.message)}});
- panel.querySelectorAll('[data-verify]').forEach(b=>b.onclick=async()=>{try{let d=await api('/documents/verify/'+b.dataset.verify);alert((d.valid?'✓ INTEGRITY VERIFIED':'✗ INTEGRITY CHECK FAILED')+'\n\nFile hash: '+d.hash_valid+'\nSignature: '+(d.signature_valid===null?'External/hash-only':d.signature_valid)+'\nVersion chain: '+d.chain_valid+'\nAlgorithm: '+d.algorithm)}catch(e){alert(e.message)}});
- panel.querySelectorAll('[data-versions]').forEach(b=>b.onclick=async()=>{try{let d=await api('/documents/versions/'+b.dataset.versions);let el=document.getElementById('history-'+b.dataset.versions);el.innerHTML='<div class="card"><b>Version history</b>'+d.versions.map(v=>`<div class="meta">V${esc(v.version_number)} · ${esc(v.timestamp)} · ${esc(v.file_hash)}</div>`).join('')+'</div>'}catch(e){alert(e.message)}})
- }catch(e){panel.innerHTML='<div class="status error">'+esc(e.message)+'</div>'}}
-async function showUpload(){try{let me=await api('/me');let d=await api('/case/invite-options?case_id='+encodeURIComponent(caseId));let types=d.allowed_document_types.map(t=>`<option value="${esc(t)}">${esc(t.replaceAll('_',' '))}</option>`).join('');panel.innerHTML=`<div class="card"><h2>Upload Case Document</h2><p class="meta">Every upload is immutable. If this case already has this document type, the upload automatically becomes the next version.</p><label>Document Type</label><select id="docType">${types}</select><input id="file" type="file"><button id="uploadNow">Upload & Sign</button><div id="uploadStatus"></div></div>`;
- document.getElementById('uploadNow').onclick=async()=>{let f=document.getElementById('file').files[0],st=document.getElementById('uploadStatus');if(!f){st.className='status error';st.textContent='Choose a file.';return}try{await elevateForSensitive('document_upload');let fd=new FormData();fd.append('case_id',caseId);fd.append('document_type',document.getElementById('docType').value);fd.append('file',f);let r=await api('/documents/upload',{method:'POST',body:fd});st.className='status success';st.textContent=r.message;setTimeout(showFiles,500)}catch(e){st.className='status error';st.textContent=e.message}}
-}catch(e){panel.innerHTML='<div class="status error">'+esc(e.message)+'</div>'}}
-async function showMembers(){try{let d=await api('/case/members?case_id='+encodeURIComponent(caseId));let html='<div class="card"><h2>Internal Members</h2>'+(d.members.length?d.members.map(m=>`<div class="member"><b>${esc(m.users?.employee_registry?.full_name||m.users?.employee_id||'User')}</b><div class="meta">${esc(m.permission_level)} · ${(m.allowed_document_types||[]).map(esc).join(', ')}</div></div>`).join(''):'<p class="meta">No internal members.</p>');
- html+='</div><div class="card"><h2>External Participants</h2>'+(d.external_participants.length?d.external_participants.map(x=>`<div class="member"><b>${esc(x.name)}</b> <span class="badge">${esc(x.status)}</span><div class="meta">${esc(x.role)} · ${esc(x.organization_name||'Independent')} · ${esc(x.email)}</div><div class="meta">${esc(x.permission_level)} · ${(x.allowed_document_types||[]).map(esc).join(', ')}</div></div>`).join(''):'<p class="meta">No external participants.</p>');
- if(d.my_access.permission_level==='grant')html+=`</div><div class="card"><h2>Invite Internal Employee</h2><input id="memberSearch" placeholder="Search employee name or ID"><div id="memberResults"></div></div><div class="card"><h2>Invite External Participant</h2><div class="grid"><div><label>Name</label><input id="exName"><label>Email</label><input id="exEmail" type="email"><label>Organization</label><input id="exOrg"></div><div><label>Organization Type</label><select id="exOrgType">${d.external_organization_types.map(x=>`<option value="${x}">${x.replaceAll('_',' ')}</option>`).join('')}</select><label>Role</label><input id="exRole" value="external participant"><label>Purpose</label><input id="exPurpose"></div></div><label>Permission</label><select id="exPerm"><option value="read">Read</option><option value="upload">Upload</option><option value="sign">Sign</option></select><label>Allowed document types</label><div class="checks">${d.my_allowed_document_types.map(t=>`<label class="check"><input type="checkbox" class="exType" value="${esc(t)}" checked> ${esc(t.replaceAll('_',' '))}</label>`).join('')}</div><button id="inviteEx" class="green">Send External Invitation</button><div id="exStatus"></div></div>`; else html+='</div>';
- panel.innerHTML=html;const search=document.getElementById('memberSearch');if(search){let timer;search.oninput=()=>{clearTimeout(timer);if(search.value.trim().length>=2)timer=setTimeout(()=>searchMembers(search.value.trim()),250)}}
- const ex=document.getElementById('inviteEx');if(ex)ex.onclick=async()=>{try{await api('/case/invite-external',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({case_id:caseId,name:exName.value,email:exEmail.value,organization_name:exOrg.value,organization_type:exOrgType.value,role:exRole.value,purpose:exPurpose.value,permission_level:exPerm.value,allowed_document_types:[...document.querySelectorAll('.exType:checked')].map(x=>x.value),expires_hours:72})});document.getElementById('exStatus').className='status success';document.getElementById('exStatus').textContent='External invitation sent.';showMembers()}catch(e){document.getElementById('exStatus').className='status error';document.getElementById('exStatus').textContent=e.message}};
- }catch(e){panel.innerHTML='<div class="status error">'+esc(e.message)+'</div>'}}
-async function searchMembers(q){try{let d=await api('/case/search-members?case_id='+encodeURIComponent(caseId)+'&q='+encodeURIComponent(q));document.getElementById('memberResults').innerHTML=d.map(x=>`<div class="result"><b>${esc(x.full_name)}</b><div class="meta">${esc(x.employee_id)} · ${esc(x.official_email)} · ${esc(x.departments?.name||'')}</div><button data-select="${esc(x.employee_id)}">Select</button></div>`).join('')||'<p class="meta">No results.</p>';document.querySelectorAll('[data-select]').forEach(b=>b.onclick=()=>openGrant(b.dataset.select))}catch(e){document.getElementById('memberResults').innerHTML='<div class="status error">'+esc(e.message)+'</div>'}}
-async function openGrant(employeeId){try{let d=await api('/case/invite-options?case_id='+encodeURIComponent(caseId));panel.innerHTML=`<div class="card"><h2>Grant Case Access</h2><p>Employee: <b>${esc(employeeId)}</b></p><label>Permission</label><select id="perm"><option value="read">Read</option><option value="upload">Upload</option><option value="sign">Sign</option><option value="grant">Grant</option></select><label>Allowed document types</label><div class="checks">${d.allowed_document_types.map(t=>`<label class="check"><input type="checkbox" class="gType" value="${esc(t)}" checked> ${esc(t.replaceAll('_',' '))}</label>`).join('')}</div><button id="grantBtn" class="green">Grant Access</button><button class="gray" onclick="showMembers()">Cancel</button><div id="grantStatus"></div></div>`;document.getElementById('grantBtn').onclick=async()=>{try{await elevateForSensitive('case_access_grant');let r=await api('/case/invite',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({case_id:caseId,employee_id:employeeId,permission_level:document.getElementById('perm').value,allowed_document_types:[...document.querySelectorAll('.gType:checked')].map(x=>x.value)})});document.getElementById('grantStatus').className='status success';document.getElementById('grantStatus').textContent=r.message;setTimeout(showMembers,500)}catch(e){document.getElementById('grantStatus').className='status error';document.getElementById('grantStatus').textContent=e.message}}}catch(e){alert(e.message)}}
-async function merkleBuild(){try{await elevateForSensitive('merkle_build');let d=await api('/case/merkle/build?case_id='+encodeURIComponent(caseId),{method:'POST'});alert('Merkle snapshot created.\n\nRoot:\n'+d.merkle_root+'\n\nVersions included: '+d.version_count)}catch(e){alert(e.message)}}
-async function merkleVerify(){try{let d=await api('/case/merkle/verify?case_id='+encodeURIComponent(caseId));alert((d.valid?'✓ MERKLE INTEGRITY VERIFIED':'✗ MERKLE MISMATCH')+'\n\nSaved root: '+d.saved_root+'\nCurrent root: '+d.current_root+'\nVersions checked: '+d.versions_checked)}catch(e){alert(e.message)}}
-document.getElementById('filesBtn').onclick=showFiles;document.getElementById('uploadBtn').onclick=showUpload;document.getElementById('membersBtn').onclick=showMembers;document.getElementById('merkleBuildBtn').onclick=merkleBuild;document.getElementById('merkleVerifyBtn').onclick=merkleVerify;showFiles();
+
+function arr(v){ return Array.isArray(v) ? v : []; }
+
+function errText(d){
+  if(typeof d?.detail === "string") return d.detail;
+  if(Array.isArray(d?.detail)) return d.detail.map(x=>{
+    const loc=Array.isArray(x.loc)?x.loc.join("."):"field";
+    return loc+": "+(x.msg||JSON.stringify(x));
+  }).join("; ");
+  return d?.message || "Request failed.";
+}
+
+async function api(path,opt={}){
+  let r;
+  try{
+    r=await fetch(API+path,{
+      ...opt,
+      headers:{...(opt.headers||{}),...H}
+    });
+  }catch(e){
+    throw new Error("Cannot connect to the NEMESIS backend. Please try again.");
+  }
+  const raw=await r.text();
+  let d={};
+  try{d=raw?JSON.parse(raw):{}}catch{d={detail:raw||"Empty server response"}}
+  if(!r.ok) throw new Error(errText(d));
+  return d;
+}
+
+function setIntegrity(message,type="success"){
+  integrityStatus.innerHTML=message
+    ? `<div class="status ${type}">${esc(message)}</div>`
+    : "";
+}
+
+async function elevateForSensitive(action){
+  const modal=document.getElementById("otpModal");
+  const status=document.getElementById("otpStatus");
+  const code=document.getElementById("otpCode");
+  const verify=document.getElementById("verifyOtpBtn");
+  const cancel=document.getElementById("cancelOtpBtn");
+
+  modal.style.display="flex";
+  code.value="";
+  status.textContent="Requesting email verification...";
+
+  try{
+    await api("/security/request-otp",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({purpose:action,case_id:caseId})
+    });
+    status.textContent="Enter the 6-digit code sent to your official email.";
+
+    return await new Promise((resolve,reject)=>{
+      verify.onclick=async()=>{
+        try{
+          await api("/security/verify-otp",{
+            method:"POST",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({purpose:action,case_id:caseId,code:code.value.trim()})
+          });
+          modal.style.display="none";
+          resolve(true);
+        }catch(e){status.textContent=e.message;}
+      };
+      cancel.onclick=()=>{
+        modal.style.display="none";
+        reject(new Error("Cancelled"));
+      };
+    });
+  }catch(e){
+    modal.style.display="none";
+    throw e;
+  }
+}
+
+async function showFiles(){
+  try{
+    const d=await api("/case/documents?case_id="+encodeURIComponent(caseId));
+    const docs=arr(d.documents);
+    let html='<div class="card"><h2>Case Documents</h2>';
+
+    if(!docs.length){
+      html+='<p class="meta">No documents uploaded yet.</p>';
+    }
+
+    for(const x of docs){
+      const v=x.version||{};
+      html+=`<div class="file">
+        <div><span class="badge">${esc(x.document_type||"document")}</span>
+        <span class="latest">Version ${esc(v.version_number||1)}</span></div>
+        <div><b>${esc(x.filename||"Document")}</b></div>
+        <div class="meta">Uploaded: ${esc(v.timestamp||"")}</div>
+        <div class="integrity">Integrity information is protected. Use <b>Verify Integrity</b> to check this version.</div>
+        <button data-versions="${esc(x.document_id||"")}">Version history</button>
+        <button class="gray" data-verify="${esc(v.version_id||"")}">Verify integrity</button>
+        <button class="green" data-open="${esc(v.version_id||"")}">Secure view</button>
+        <div id="history-${esc(x.document_id||"")}"></div>
+      </div>`;
+    }
+
+    html+='</div>';
+    panel.innerHTML=html;
+
+    panel.querySelectorAll('[data-open]').forEach(b=>b.onclick=async()=>{
+      try{
+        const d=await api('/documents/file/'+encodeURIComponent(b.dataset.open));
+        window.open(d.url,'_blank','noopener');
+      }catch(e){alert(e.message)}
+    });
+
+    panel.querySelectorAll('[data-verify]').forEach(b=>b.onclick=async()=>{
+      try{
+        const d=await api('/documents/verify/'+encodeURIComponent(b.dataset.verify));
+        alert(d.valid
+          ? '✓ INTEGRITY VERIFIED\n\nThe stored file, signature, and version chain are valid.'
+          : '✗ INTEGRITY CHECK FAILED\n\nThe stored file or version chain could not be verified.'
+        );
+      }catch(e){alert(e.message)}
+    });
+
+    panel.querySelectorAll('[data-versions]').forEach(b=>b.onclick=async()=>{
+      try{
+        const d=await api('/documents/versions/'+encodeURIComponent(b.dataset.versions));
+        const versions=arr(d.versions);
+        const el=document.getElementById('history-'+b.dataset.versions);
+        el.innerHTML='<div class="card"><b>Version history</b>'+
+          (versions.length
+            ? versions.map(v=>`<div class="meta" style="margin-top:8px">V${esc(v.version_number||1)} · ${esc(v.timestamp||"")}</div>`).join('')
+            : '<div class="meta">No version history available.</div>')+
+          '</div>';
+      }catch(e){alert(e.message)}
+    });
+  }catch(e){
+    panel.innerHTML='<div class="status error">'+esc(e.message)+'</div>';
+  }
+}
+
+async function showUpload(){
+  try{
+    const d=await api('/case/invite-options?case_id='+encodeURIComponent(caseId));
+    const types=arr(d.allowed_document_types);
+    if(!types.length){
+      panel.innerHTML='<div class="card"><h2>Upload Case Document</h2><p class="meta">You do not have permission to upload documents in this case.</p></div>';
+      return;
+    }
+
+    panel.innerHTML=`<div class="card">
+      <h2>Upload Case Document</h2>
+      <p class="meta">Every upload is immutable. A new upload of the same document type becomes the next version.</p>
+      <label>Document Type</label>
+      <select id="docType">${types.map(t=>`<option value="${esc(t)}">${esc(t.replaceAll('_',' '))}</option>`).join('')}</select>
+      <input id="file" type="file">
+      <button id="uploadNow">Upload &amp; Sign</button>
+      <div id="uploadStatus"></div>
+    </div>`;
+
+    document.getElementById('uploadNow').onclick=async()=>{
+      const f=document.getElementById('file').files[0];
+      const st=document.getElementById('uploadStatus');
+      if(!f){st.className='status error';st.textContent='Choose a file.';return;}
+      try{
+        await elevateForSensitive('document_upload');
+        const fd=new FormData();
+        fd.append('case_id',caseId);
+        fd.append('document_type',document.getElementById('docType').value);
+        fd.append('file',f);
+        const r=await api('/documents/upload',{method:'POST',body:fd});
+        st.className='status success';
+        st.textContent=r.message||'Document uploaded successfully.';
+        setTimeout(showFiles,500);
+      }catch(e){
+        st.className='status error';
+        st.textContent=e.message;
+      }
+    };
+  }catch(e){panel.innerHTML='<div class="status error">'+esc(e.message)+'</div>';}
+}
+
+async function showMembers(){
+  try{
+    const d=await api('/case/members?case_id='+encodeURIComponent(caseId));
+    const members=arr(d.members);
+    const external=arr(d.external_participants);
+    const allowed=arr(d.my_allowed_document_types);
+
+    let html='<div class="card"><h2>Internal Members</h2>'+
+      (members.length
+        ? members.map(m=>`<div class="member"><b>${esc(m.users?.employee_registry?.full_name||m.users?.employee_id||'User')}</b><div class="meta">${esc(m.permission_level||'')} · ${arr(m.allowed_document_types).map(esc).join(', ')}</div></div>`).join('')
+        : '<p class="meta">No internal members.</p>')+
+      '</div>';
+
+    html+='<div class="card"><h2>External Participants</h2>'+
+      (external.length
+        ? external.map(x=>`<div class="member"><b>${esc(x.name||'Participant')}</b> <span class="badge">${esc(x.status||'')}</span><div class="meta">${esc(x.role||'')} · ${esc(x.organization_name||'Independent')}</div><div class="meta">${esc(x.permission_level||'')} · ${arr(x.allowed_document_types).map(esc).join(', ')}</div></div>`).join('')
+        : '<p class="meta">No external participants.</p>')+
+      '</div>';
+
+    if(d.my_access?.permission_level==='grant'){
+      html+=`<div class="card"><h2>Invite Internal Employee</h2><input id="memberSearch" placeholder="Search employee name or ID"><div id="memberResults"></div></div>`;
+      html+=`<div class="card"><h2>Invite External Participant</h2>
+        <div class="grid"><div>
+          <label>Name</label><input id="exName">
+          <label>Email</label><input id="exEmail" type="email">
+          <label>Organization</label><input id="exOrg">
+        </div><div>
+          <label>Organization Type</label><select id="exOrgType">${arr(d.external_organization_types).map(x=>`<option value="${esc(x)}">${esc(x.replaceAll('_',' '))}</option>`).join('')}</select>
+          <label>Role</label><input id="exRole" value="external participant">
+          <label>Purpose</label><input id="exPurpose">
+        </div></div>
+        <label>Permission</label><select id="exPerm"><option value="read">Read</option><option value="upload">Upload</option><option value="sign">Sign</option></select>
+        <label>Allowed document types</label><div class="checks">${allowed.map(t=>`<label class="check"><input type="checkbox" class="exType" value="${esc(t)}" checked> ${esc(t.replaceAll('_',' '))}</label>`).join('')}</div>
+        <button id="inviteEx" class="green">Send External Invitation</button><div id="exStatus"></div>
+      </div>`;
+    }
+
+    panel.innerHTML=html;
+
+    const search=document.getElementById('memberSearch');
+    if(search){
+      let timer;
+      search.oninput=()=>{
+        clearTimeout(timer);
+        const q=search.value.trim();
+        if(q.length>=2)timer=setTimeout(()=>searchMembers(q),250);
+      };
+    }
+
+    const ex=document.getElementById('inviteEx');
+    if(ex)ex.onclick=async()=>{
+      const status=document.getElementById('exStatus');
+      try{
+        await elevateForSensitive('case_access_grant');
+        await api('/case/invite-external',{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({
+            case_id:caseId,name:exName.value.trim(),email:exEmail.value.trim(),organization_name:exOrg.value.trim(),
+            organization_type:exOrgType.value,role:exRole.value.trim(),purpose:exPurpose.value.trim(),
+            permission_level:exPerm.value,
+            allowed_document_types:[...document.querySelectorAll('.exType:checked')].map(x=>x.value),
+            expires_hours:72
+          })
+        });
+        status.className='status success';status.textContent='External invitation sent.';
+        setTimeout(showMembers,700);
+      }catch(e){status.className='status error';status.textContent=e.message;}
+    };
+  }catch(e){panel.innerHTML='<div class="status error">'+esc(e.message)+'</div>';}
+}
+
+async function searchMembers(q){
+  try{
+    const d=arr(await api('/case/search-members?case_id='+encodeURIComponent(caseId)+'&q='+encodeURIComponent(q)));
+    document.getElementById('memberResults').innerHTML=d.map(x=>`<div class="result"><b>${esc(x.full_name)}</b><div class="meta">${esc(x.employee_id)} · ${esc(x.official_email)} · ${esc(x.departments?.name||'')}</div><button data-select="${esc(x.employee_id)}">Select</button></div>`).join('')||'<p class="meta">No results.</p>';
+    document.querySelectorAll('[data-select]').forEach(b=>b.onclick=()=>openGrant(b.dataset.select));
+  }catch(e){document.getElementById('memberResults').innerHTML='<div class="status error">'+esc(e.message)+'</div>';}
+}
+
+async function openGrant(employeeId){
+  try{
+    const d=await api('/case/invite-options?case_id='+encodeURIComponent(caseId));
+    const types=arr(d.allowed_document_types);
+    panel.innerHTML=`<div class="card"><h2>Grant Case Access</h2>
+      <p>Employee selected.</p>
+      <label>Permission</label><select id="perm"><option value="read">Read</option><option value="upload">Upload</option><option value="sign">Sign</option><option value="grant">Grant</option></select>
+      <label>Allowed document types</label><div class="checks">${types.map(t=>`<label class="check"><input type="checkbox" class="gType" value="${esc(t)}" checked> ${esc(t.replaceAll('_',' '))}</label>`).join('')}</div>
+      <button id="grantBtn" class="green">Grant Access</button><button class="gray" onclick="showMembers()">Cancel</button><div id="grantStatus"></div>
+    </div>`;
+    document.getElementById('grantBtn').onclick=async()=>{
+      const status=document.getElementById('grantStatus');
+      try{
+        await elevateForSensitive('case_access_grant');
+        const r=await api('/case/invite',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({case_id:caseId,employee_id:employeeId,permission_level:document.getElementById('perm').value,allowed_document_types:[...document.querySelectorAll('.gType:checked')].map(x=>x.value)})});
+        status.className='status success';status.textContent=r.message||'Access granted.';
+        setTimeout(showMembers,700);
+      }catch(e){status.className='status error';status.textContent=e.message;}
+    };
+  }catch(e){alert(e.message)}
+}
+
+async function merkleBuild(){
+  try{
+    await elevateForSensitive('merkle_build');
+    const d=await api('/case/merkle/build?case_id='+encodeURIComponent(caseId),{method:'POST'});
+    setIntegrity(`Integrity snapshot created successfully. ${Number(d.version_count||0)} immutable document version(s) included.`, 'success');
+  }catch(e){setIntegrity(e.message,'error');}
+}
+
+async function merkleVerify(){
+  try{
+    await elevateForSensitive('merkle_verify');
+    const d=await api('/case/merkle/verify?case_id='+encodeURIComponent(caseId));
+    if(d.valid){
+      setIntegrity(`✓ Merkle integrity verified. ${Number(d.versions_checked||0)} immutable document version(s) matched the saved snapshot.`, 'success');
+    }else{
+      setIntegrity('✗ Merkle integrity mismatch. The current document-version set differs from the saved integrity snapshot.','error');
+    }
+  }catch(e){
+    if(e.message.includes('No Merkle integrity snapshot')){
+      setIntegrity('No Merkle snapshot exists yet. Click “Build Integrity Snapshot” first.','warn');
+    }else{
+      setIntegrity(e.message,'error');
+    }
+  }
+}
+
+document.getElementById('filesBtn').onclick=()=>elevateForSensitive('VIEW_FILES').then(showFiles).catch(e=>{if(e.message!=='Cancelled')alert(e.message)});
+document.getElementById('uploadBtn').onclick=()=>elevateForSensitive('UPLOAD_FILE').then(showUpload).catch(e=>{if(e.message!=='Cancelled')alert(e.message)});
+document.getElementById('membersBtn').onclick=()=>elevateForSensitive('MANAGE_MEMBERS').then(showMembers).catch(e=>{if(e.message!=='Cancelled')alert(e.message)});
+document.getElementById('merkleBuildBtn').onclick=merkleBuild;
+document.getElementById('merkleVerifyBtn').onclick=merkleVerify;
+
+// Load the case files after the page opens. The raw Case ID is intentionally not rendered.
+showFiles();
 </script>
-</body></html>
+</body>
+</html>

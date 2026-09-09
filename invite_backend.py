@@ -1,3 +1,4 @@
+
 """
 SIH Secure DMS - unified backend v10
 
@@ -34,16 +35,11 @@ from reportlab.lib.enums import TA_CENTER
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib import colors
 from fir_pdf import generate_fir_pdf
-from document_crypto import calculate_file_hash, generate_user_key_pair
-from document_crypto import encrypt_private_key, sign_file_hash
-
 from document_crypto import (
-    calculate_file_hash,
-    generate_user_key_pair,
-    #save_private_key,
-    sign_file_hash,
-    verify_signature,
+    calculate_file_hash, generate_user_key_pair, encrypt_private_key,
+    sign_file_hash, verify_signature,
 )
+from merkle import calculate_merkle_root
 
 load_dotenv()
 
@@ -66,6 +62,7 @@ GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 # Email links must point to a real HTTP page.
 # For local development this is the backend's activate-page.
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+FRONTEND_URL = os.getenv("FRONTEND_URL", BASE_URL)
 
 SESSION_LIFETIME_HOURS = 8
 ELEVATION_LIFETIME_MINUTES = 15
@@ -79,7 +76,13 @@ ALLOWED_EXTENSIONS = {
 }
 ALLOWED_DOCUMENT_TYPES = {
     "fir", "evidence", "forensic_report", "postmortem_report",
-    "witness_statement", "charge_sheet", "court_order", "judgment",
+    "witness_statement", "suspect_interview", "medical_report",
+    "charge_sheet", "court_order", "judgment", "cctv", "other",
+}
+EXTERNAL_ORGANIZATION_TYPES = {
+    "police", "fsl", "government_hospital", "private_hospital",
+    "court", "prosecution", "private_lab", "media", "legal",
+    "academic", "ngo", "other",
 }
 
 # Prototype-only short-lived OTP state.
@@ -415,7 +418,10 @@ def request_email_otp(
 ):
     u = get_current_user(authorization)
 
-    purposes = {"VIEW_FILES", "UPLOAD_FILE", "MANAGE_MEMBERS", "APP_INVITE"}
+    purposes = {
+        "VIEW_FILES", "UPLOAD_FILE", "MANAGE_MEMBERS", "APP_INVITE",
+        "document_upload", "case_access_grant", "merkle_build", "merkle_verify",
+    }
     if req.purpose not in purposes:
         raise HTTPException(400, "Invalid OTP purpose.")
 
@@ -895,10 +901,9 @@ def create_case(
             "permission_level": "grant",
             "granted_by": current_user["user_id"],
             "allowed_document_types": [
-                "fir",
-                "evidence",
-                "witness_statement",
-                "charge_sheet",
+                "fir", "evidence", "witness_statement", "suspect_interview",
+                "forensic_report", "postmortem_report", "medical_report",
+                "charge_sheet", "court_order", "judgment", "cctv", "other",
             ],
         })
         .execute()
@@ -949,11 +954,9 @@ def create_case(
 
     # sign_file_hash now retrieves/decrypts the private key
     # from Supabase instead of reading ./private_keys.
-    signature = sign_file_hash(
-        current_user["user_id"],
-        file_hash,
-        supabase,
-    )
+    signed = sign_file_hash(current_user["user_id"], file_hash, supabase)
+    signature = signed["signature"]
+    signing_key_id = signed["key_id"]
 
     document_result = (
         supabase.table("documents")
@@ -1022,6 +1025,8 @@ def create_case(
             "storage_path": storage_path,
             "file_hash": file_hash,
             "previous_version_hash": None,
+            "version_number": 1,
+            "signing_key_id": signing_key_id,
             "signature": signature,
             "co_signature": None,
             "uploader_id": current_user["user_id"],
@@ -1159,52 +1164,53 @@ def case_documents(
     u = get_current_user(authorization)
     m = membership(u["user_id"], case_id)
     allowed = set(m.get("allowed_document_types") or [])
-
     try:
         r = (
             supabase.table("documents")
-            .select(
-                "document_id,case_id,document_type,file_type,uploader_id,"
-                "current_version_id,"
-                "document_versions!fk_documents_current_version("
-                "version_id,storage_path,file_hash,signature,timestamp)"
-            )
-            .eq("case_id", case_id).execute()
+            .select("document_id,case_id,document_type,file_type,uploader_id,current_version_id")
+            .eq("case_id", case_id).order("created_at", desc=False).execute()
         )
-
         visible = []
         for d in r.data or []:
             if d["document_type"] not in allowed:
                 continue
-            versions = d.get("document_versions") or []
-            v = versions[0] if isinstance(versions, list) and versions else (
-                versions if isinstance(versions, dict) else {}
+            vr = (
+                supabase.table("document_versions")
+                .select("version_id,version_number,storage_path,file_hash,signature,timestamp,previous_version_hash,signing_key_id")
+                .eq("document_id", d["document_id"])
+                .order("version_number", desc=True).limit(1).execute()
             )
+            v = vr.data[0] if vr.data else {}
             visible.append({
-                "document_id": d["document_id"],
-                "case_id": d["case_id"],
-                "document_type": d["document_type"],
-                "file_type": d["file_type"],
-                "uploader_id": d["uploader_id"],
-                "current_version_id": d["current_version_id"],
+                "document_id": d["document_id"], "case_id": d["case_id"],
+                "document_type": d["document_type"], "file_type": d["file_type"],
+                "uploader_id": d["uploader_id"], "current_version_id": d["current_version_id"],
                 "filename": Path(v.get("storage_path", "")).name or "Unnamed file",
                 "version": {
-                    "version_id": v.get("version_id"),
-                    "file_hash": v.get("file_hash"),
-                    "signature": v.get("signature"),
+                    "version_id": v.get("version_id"), "version_number": v.get("version_number"),
+                    "file_hash": v.get("file_hash"), "signature": v.get("signature"),
                     "timestamp": v.get("timestamp"),
                 },
             })
-
-        return {
-            "my_permission_level": m["permission_level"],
-            "my_allowed_document_types": sorted(allowed),
-            "documents": visible,
-        }
-    except HTTPException:
-        raise
+        return {"my_permission_level": m["permission_level"], "my_allowed_document_types": sorted(allowed), "documents": visible}
     except Exception as exc:
         raise HTTPException(500, f"Could not load case files: {error_text(exc)}")
+
+
+@app.get("/documents/versions/{document_id}")
+def document_versions(document_id: str, authorization: str | None = Header(default=None)):
+    u = get_current_user(authorization)
+    dr = supabase.table("documents").select("document_id,case_id,document_type").eq("document_id", document_id).limit(1).execute()
+    if not dr.data:
+        raise HTTPException(404, "Document not found.")
+    d = dr.data[0]
+    m = membership(u["user_id"], d["case_id"])
+    if d["document_type"] not in set(m.get("allowed_document_types") or []):
+        raise HTTPException(403, "You are not authorized to view this document.")
+    r = supabase.table("document_versions").select(
+        "version_id,version_number,file_hash,previous_version_hash,signature,timestamp,uploader_id,signing_key_id,storage_path"
+    ).eq("document_id", document_id).order("version_number", desc=False).execute()
+    return {"document": d, "versions": r.data or []}
 
 
 @app.get("/documents/file/{version_id}")
@@ -1254,68 +1260,92 @@ def document_file(
 
 
 @app.get("/documents/verify/{version_id}")
-def verify_document(
-    version_id: str,
-    authorization: str | None = Header(default=None),
-):
+def verify_document(version_id: str, authorization: str | None = Header(default=None)):
     u = get_current_user(authorization)
     try:
-        vr = (
-            supabase.table("document_versions")
-            .select(
-                "version_id,document_id,storage_path,file_hash,signature,uploader_id"
-            )
-            .eq("version_id", version_id).limit(1).execute()
-        )
+        vr = supabase.table("document_versions").select(
+            "version_id,document_id,storage_path,file_hash,signature,uploader_id,version_number,previous_version_hash,signing_key_id"
+        ).eq("version_id", version_id).limit(1).execute()
         if not vr.data:
             raise HTTPException(404, "Document version not found.")
         v = vr.data[0]
-
-        dr = (
-            supabase.table("documents")
-            .select("document_id,case_id,document_type")
-            .eq("document_id", v["document_id"]).limit(1).execute()
-        )
+        dr = supabase.table("documents").select("document_id,case_id,document_type").eq("document_id", v["document_id"]).limit(1).execute()
         if not dr.data:
             raise HTTPException(404, "Document not found.")
-
         d = dr.data[0]
         m = membership(u["user_id"], d["case_id"])
         if d["document_type"] not in set(m.get("allowed_document_types") or []):
             raise HTTPException(403, "You are not authorized to verify this document.")
 
-        stored = supabase.storage.from_(DOCUMENT_BUCKET).download(
-            v["storage_path"]
-        )
+        stored = supabase.storage.from_(DOCUMENT_BUCKET).download(v["storage_path"])
         actual_hash = hashlib.sha256(stored).hexdigest()
         hash_valid = secrets.compare_digest(actual_hash, v["file_hash"])
 
-        kr = (
-            supabase.table("user_keys").select("public_key")
-            .eq("user_id", v["uploader_id"]).eq("key_status", "active")
-            .limit(1).execute()
-        )
-        if not kr.data:
-            raise HTTPException(404, "Uploader public key not found.")
+        # Historical versions use the exact signing key recorded at upload time.
+        signature_valid = None
+        signing_algorithm = "external-hash-only"
+        if v.get("signing_key_id"):
+            key_query = supabase.table("user_keys").select("public_key,algorithm").eq("key_id", v["signing_key_id"]).limit(1).execute()
+            if not key_query.data:
+                raise HTTPException(404, "Signing public key not found.")
+            signature_valid = verify_signature(key_query.data[0]["public_key"], v["file_hash"], v["signature"])
+            signing_algorithm = key_query.data[0].get("algorithm") or "RSA-PSS-SHA256"
+        elif v.get("uploader_id"):
+            # Legacy records created before signing_key_id existed.
+            key_query = supabase.table("user_keys").select("public_key,algorithm").eq("user_id", v["uploader_id"]).eq("key_status", "active").limit(1).execute()
+            if key_query.data:
+                signature_valid = verify_signature(key_query.data[0]["public_key"], v["file_hash"], v["signature"])
+                signing_algorithm = key_query.data[0].get("algorithm") or "RSA-PSS-SHA256"
 
-        signature_valid = verify_signature(
-            kr.data[0]["public_key"], v["file_hash"], v["signature"]
-        )
+        chain_valid = True
+        chain_message = "First version has no previous hash."
+        if (v.get("version_number") or 1) > 1:
+            prev = supabase.table("document_versions").select("version_id,file_hash").eq("document_id", v["document_id"]).eq("version_number", (v.get("version_number") or 1) - 1).limit(1).execute()
+            if not prev.data:
+                chain_valid = False
+                chain_message = "Previous version is missing."
+            else:
+                chain_valid = secrets.compare_digest(v.get("previous_version_hash") or "", prev.data[0]["file_hash"])
+                chain_message = "Previous-version hash matches." if chain_valid else "Previous-version hash mismatch."
 
         return {
-            "valid": bool(hash_valid and signature_valid),
-            "hash_valid": hash_valid,
-            "signature_valid": signature_valid,
-            "stored_hash": v["file_hash"],
-            "actual_hash": actual_hash,
-            "algorithm": "SHA-256 + ECDSA-P256",
-            "version_id": version_id,
-            "uploader_id": v["uploader_id"],
+            "valid": bool(hash_valid and chain_valid and (signature_valid is not False)),
+            "hash_valid": hash_valid, "signature_valid": signature_valid,
+            "chain_valid": chain_valid, "chain_message": chain_message,
+            "stored_hash": v["file_hash"], "actual_hash": actual_hash,
+            "algorithm": f"SHA-256 + {signing_algorithm}",
+            "version_id": version_id, "version_number": v.get("version_number"),
+            "signing_key_id": v.get("signing_key_id"), "uploader_id": v["uploader_id"],
         }
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(500, f"Verification failed: {error_text(exc)}")
+
+
+@app.get("/documents/chain-verify/{document_id}")
+def verify_version_chain(document_id: str, authorization: str | None = Header(default=None)):
+    u = get_current_user(authorization)
+    dr = supabase.table("documents").select("document_id,case_id,document_type").eq("document_id", document_id).limit(1).execute()
+    if not dr.data:
+        raise HTTPException(404, "Document not found.")
+    d = dr.data[0]
+    m = membership(u["user_id"], d["case_id"])
+    if d["document_type"] not in set(m.get("allowed_document_types") or []):
+        raise HTTPException(403, "You are not authorized to verify this document.")
+    r = supabase.table("document_versions").select("version_id,version_number,file_hash,previous_version_hash").eq("document_id", document_id).order("version_number", desc=False).execute()
+    versions = r.data or []
+    errors = []
+    for i, v in enumerate(versions):
+        expected_num = i + 1
+        if (v.get("version_number") or 0) != expected_num:
+            errors.append({"version_id": v["version_id"], "error": "Version numbering gap or duplicate."})
+        if i == 0:
+            if v.get("previous_version_hash") is not None:
+                errors.append({"version_id": v["version_id"], "error": "First version has a previous hash."})
+        elif v.get("previous_version_hash") != versions[i-1].get("file_hash"):
+            errors.append({"version_id": v["version_id"], "error": "Previous-version hash mismatch.", "expected": versions[i-1].get("file_hash"), "actual": v.get("previous_version_hash")})
+    return {"valid": not errors and bool(versions), "document_id": document_id, "versions_checked": len(versions), "errors": errors}
 
 
 def check_upload_permission(user_id, case_id, document_type):
@@ -1339,23 +1369,15 @@ async def upload_document(
 ):
     u = get_current_user(authorization)
     document_type = document_type.strip().lower()
-
     if document_type not in ALLOWED_DOCUMENT_TYPES:
         raise HTTPException(400, "Invalid document type.")
-
     check_upload_permission(u["user_id"], case_id, document_type)
-
     if not file.filename:
         raise HTTPException(400, "Filename missing.")
-
     name = os.path.basename(file.filename)
     ext = Path(name).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            400,
-            "Unsupported file type. Allowed: PDF, PNG, JPG, DOC, DOCX, PPT, PPTX, TXT."
-        )
-
+        raise HTTPException(400, "Unsupported file type. Allowed: PDF, PNG, JPG, DOC, DOCX, PPT, PPTX, TXT.")
     data = await file.read()
     if not data:
         raise HTTPException(400, "The selected file is empty.")
@@ -1366,131 +1388,128 @@ async def upload_document(
         ft = "image" if ext in {".jpg", ".jpeg", ".png"} else "text"
         h = calculate_file_hash(data)
         ensure_user_key(u["user_id"], supabase)
-        sig = sign_file_hash(u["user_id"], h)
+        signed = sign_file_hash(u["user_id"], h, supabase)
 
-        dr = supabase.table("documents").insert({
-            "case_id": case_id,
-            "document_type": document_type,
-            "file_type": ft,
-            "uploader_id": u["user_id"],
-        }).execute()
-        if not dr.data:
-            raise RuntimeError("Document insert returned no row.")
-        did = dr.data[0]["document_id"]
+        # One logical document per CASE + DOCUMENT TYPE.
+        existing = supabase.table("documents").select("document_id,current_version_id,file_type,uploader_id").eq("case_id", case_id).eq("document_type", document_type).order("created_at", desc=False).limit(1).execute()
+        if existing.data:
+            did = existing.data[0]["document_id"]
+            versions = supabase.table("document_versions").select("version_id,version_number,file_hash").eq("document_id", did).order("version_number", desc=True).limit(1).execute()
+            latest = versions.data[0] if versions.data else None
+            version_number = int(latest.get("version_number") or 1) + 1 if latest else 1
+            previous_hash = latest.get("file_hash") if latest else None
+        else:
+            dr = supabase.table("documents").insert({"case_id": case_id, "document_type": document_type, "file_type": ft, "uploader_id": u["user_id"]}).execute()
+            if not dr.data:
+                raise RuntimeError("Document insert returned no row.")
+            did = dr.data[0]["document_id"]
+            version_number = 1
+            previous_hash = None
 
         vid = str(uuid.uuid4())
         safe = name.replace("/", "_").replace("\\", "_")
-        path = f"{case_id}/{did}/{vid}/{safe}"
+        path = f"{case_id}/{did}/v{version_number}/{vid}_{safe}"
         ctype = file.content_type or mimetypes.guess_type(name)[0] or "application/octet-stream"
-
-        supabase.storage.from_(DOCUMENT_BUCKET).upload(
-            path, data, {"content-type": ctype, "upsert": False}
-        )
+        supabase.storage.from_(DOCUMENT_BUCKET).upload(path, data, {"content-type": ctype, "upsert": False})
 
         vr = supabase.table("document_versions").insert({
-            "version_id": vid,
-            "document_id": did,
-            "storage_path": path,
-            "file_hash": h,
-            "previous_version_hash": None,
-            "signature": sig,
-            "co_signature": None,
-            "uploader_id": u["user_id"],
-            "timestamp": iso(now()),
+            "version_id": vid, "document_id": did, "storage_path": path,
+            "file_hash": h, "previous_version_hash": previous_hash,
+            "version_number": version_number, "signing_key_id": signed["key_id"],
+            "signature": signed["signature"], "co_signature": None,
+            "uploader_id": u["user_id"], "timestamp": iso(now()),
         }).execute()
         if not vr.data:
             raise RuntimeError("document_versions insert returned no row.")
-
-        supabase.table("documents").update({
-            "current_version_id": vid
-        }).eq("document_id", did).execute()
-
-        notify(
-            u["user_id"],
-            "File uploaded",
-            f"{name} was uploaded to the case and digitally signed.",
-            "document_uploaded",
-            case_id=case_id,
-        )
-
-        return {
-            "success": True,
-            "message": "File uploaded and digitally signed.",
-            "document_id": did,
-            "version_id": vid,
-            "file_hash": h,
-            "signature": sig,
-            "storage_path": path,
-        }
+        supabase.table("documents").update({"current_version_id": vid, "file_type": ft, "uploader_id": u["user_id"]}).eq("document_id", did).execute()
+        notify(u["user_id"], "File uploaded", f"{name} uploaded as version {version_number}.", "document_uploaded", case_id=case_id)
+        return {"success": True, "message": f"File uploaded as Version {version_number}.", "document_id": did, "version_id": vid, "version_number": version_number, "file_hash": h, "signature": signed["signature"], "storage_path": path}
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(500, f"File registration failed: {error_text(exc)}")
 
 
+# --------------------------- CASE MERKLE ---------------------------
+
+def _case_merkle_snapshot(case_id: str):
+    docs = supabase.table("documents").select("document_id,document_type").eq("case_id", case_id).order("document_id", desc=False).execute().data or []
+    leaves = []
+    for d in docs:
+        versions = supabase.table("document_versions").select("version_id,version_number,file_hash").eq("document_id", d["document_id"]).order("version_number", desc=False).execute().data or []
+        for v in versions:
+            leaves.append((d["document_id"], d["document_type"], int(v.get("version_number") or 0), v["version_id"], v["file_hash"]))
+    leaves.sort(key=lambda x: (x[0], x[2], x[3]))
+    hashes = [x[4] for x in leaves]
+    root = calculate_merkle_root(hashes) if hashes else None
+    fingerprint = hashlib.sha256("|".join(f"{x[0]}:{x[2]}:{x[3]}:{x[4]}" for x in leaves).encode()).hexdigest()
+    return root, fingerprint, leaves
+
+@app.post("/case/merkle/build")
+def build_case_merkle(case_id: str, authorization: str | None = Header(default=None)):
+    u = get_current_user(authorization)
+    m = membership(u["user_id"], case_id)
+    if m["permission_level"] not in {"grant", "sign"}:
+        raise HTTPException(403, "You need sign or grant permission to create a case integrity snapshot.")
+    root, fingerprint, leaves = _case_merkle_snapshot(case_id)
+    if not root:
+        raise HTTPException(400, "The case has no document versions yet.")
+    r = supabase.table("case_merkle_roots").insert({"case_id": case_id, "merkle_root": root, "version_set_fingerprint": fingerprint, "document_count": len(leaves), "created_by": u["user_id"]}).execute()
+    return {"success": True, "merkle_root": root, "version_set_fingerprint": fingerprint, "version_count": len(leaves), "merkle_id": r.data[0]["merkle_id"] if r.data else None}
+
+@app.get("/case/merkle/verify")
+def verify_case_merkle(case_id: str, authorization: str | None = Header(default=None)):
+    u = get_current_user(authorization)
+    m = membership(u["user_id"], case_id)
+    if m["permission_level"] not in {"read", "upload", "sign", "grant"}:
+        raise HTTPException(403, "You don't have access to this case.")
+    latest = supabase.table("case_merkle_roots").select("merkle_id,merkle_root,version_set_fingerprint,document_count,created_at").eq("case_id", case_id).order("created_at", desc=True).limit(1).execute()
+    if not latest.data:
+        raise HTTPException(404, "No Merkle integrity snapshot exists for this case yet.")
+    root, fingerprint, leaves = _case_merkle_snapshot(case_id)
+    saved = latest.data[0]
+    return {"valid": bool(root == saved["merkle_root"] and fingerprint == saved["version_set_fingerprint"]), "saved_root": saved["merkle_root"], "current_root": root, "saved_fingerprint": saved["version_set_fingerprint"], "current_fingerprint": fingerprint, "versions_checked": len(leaves), "created_at": saved["created_at"]}
+
+
 # --------------------------- CASE MEMBERS ---------------------------
 
 @app.get("/case/members")
-def case_members(
-    case_id: str,
-    authorization: str | None = Header(default=None),
-):
+def case_members(case_id: str, authorization: str | None = Header(default=None)):
     u = get_current_user(authorization)
     mine = membership(u["user_id"], case_id)
     try:
-        r = (
-            supabase.table("case_membership")
-            .select(
-                "user_id,permission_level,allowed_document_types,granted_by,"
-                "delegated_by,users!case_membership_user_id_fkey(employee_id,"
-                "employee_registry!fk_users_employee(full_name,departments(name)))"
-            )
-            .eq("case_id", case_id).execute()
-        )
-        return {"my_access": mine, "members": r.data or []}
+        r = supabase.table("case_membership").select(
+            "user_id,permission_level,allowed_document_types,granted_by,delegated_by,"
+            "users!case_membership_user_id_fkey(employee_id,employee_registry!fk_users_employee(full_name,departments(name)))"
+        ).eq("case_id", case_id).execute()
+        external = supabase.table("external_case_participants").select(
+            "participant_id,name,email,organization_name,organization_type,role,purpose,permission_level,allowed_document_types,status,expires_at,accepted_at,created_at"
+        ).eq("case_id", case_id).execute()
+        return {"my_access": mine, "members": r.data or [], "external_participants": external.data or []}
     except Exception as exc:
         raise HTTPException(500, f"Could not load members: {error_text(exc)}")
 
-
 @app.get("/case/search-members")
-def search_case_members(
-    case_id: str,
-    q: str,
-    authorization: str | None = Header(default=None),
-):
+def search_case_members(case_id: str, q: str, authorization: str | None = Header(default=None)):
     u = get_current_user(authorization)
     mine = membership(u["user_id"], case_id)
     if mine["permission_level"] != "grant":
         raise HTTPException(403, "You don't have grant permission on this case.")
-
     q = q.strip()
-    if len(q) < 2:
-        return []
-
+    if len(q) < 2: return []
     try:
-        r = (
-            supabase.table("employee_registry")
-            .select("employee_id,full_name,official_email,rank,department_id")
-            .eq("department_id", u["department_id"])
-            .or_(f"full_name.ilike.%{q}%,employee_id.ilike.%{q}%")
-            .limit(20).execute()
-        )
+        r = supabase.table("employee_registry").select("employee_id,full_name,official_email,rank,department_id,departments(name)").or_(f"full_name.ilike.%{q}%,employee_id.ilike.%{q}%").limit(30).execute()
         return r.data or []
     except Exception as exc:
         raise HTTPException(500, f"Member search failed: {error_text(exc)}")
 
-
 @app.get("/case/invite-options")
-def case_invite_options(
-    case_id: str,
-    authorization: str | None = Header(default=None),
-):
+def case_invite_options(case_id: str, authorization: str | None = Header(default=None)):
     u = get_current_user(authorization)
     mine = membership(u["user_id"], case_id)
     if mine["permission_level"] != "grant":
         raise HTTPException(403, "You don't have grant permission on this case.")
-    return {"allowed_document_types": sorted(mine.get("allowed_document_types") or [])}
-
+    return {"allowed_document_types": sorted(mine.get("allowed_document_types") or []), "external_organization_types": sorted(EXTERNAL_ORGANIZATION_TYPES)}
 
 class CaseInviteRequest(BaseModel):
     case_id: str
@@ -1498,79 +1517,125 @@ class CaseInviteRequest(BaseModel):
     permission_level: str
     allowed_document_types: list[str]
 
-
 @app.post("/case/invite")
-def case_invite(
-    req: CaseInviteRequest,
-    authorization: str | None = Header(default=None),
-):
+def case_invite(req: CaseInviteRequest, authorization: str | None = Header(default=None)):
     u = get_current_user(authorization)
-    if not u["is_elevated"]:
-        raise HTTPException(403, "Complete authenticator 2FA before granting case access.")
-
-    if req.permission_level not in {"read", "upload", "sign", "grant"}:
-        raise HTTPException(400, "Invalid permission level.")
-
+    if not u["is_elevated"]: raise HTTPException(403, "Complete authenticator 2FA before granting case access.")
+    if req.permission_level not in {"read", "upload", "sign", "grant"}: raise HTTPException(400, "Invalid permission level.")
     inviter = membership(u["user_id"], req.case_id)
-    if inviter["permission_level"] != "grant":
-        raise HTTPException(403, "You don't have grant permission on this case.")
+    if inviter["permission_level"] != "grant": raise HTTPException(403, "You don't have grant permission on this case.")
+    requested = set(req.allowed_document_types); available = set(inviter.get("allowed_document_types") or [])
+    if not requested or not requested.issubset(available): raise HTTPException(403, f"You can grant only document types you have: {sorted(available)}")
+    target = supabase.table("users").select("user_id").eq("employee_id", req.employee_id).limit(1).execute()
+    if not target.data: raise HTTPException(404, "That employee does not have an app account yet. Invite them from the homepage first.")
+    target_uid = target.data[0]["user_id"]
+    existing = supabase.table("case_membership").select("membership_id").eq("case_id", req.case_id).eq("user_id", target_uid).limit(1).execute()
+    if existing.data: raise HTTPException(400, "This person already has access to this case.")
+    supabase.table("case_membership").insert({"user_id": target_uid,"case_id": req.case_id,"permission_level": req.permission_level,"granted_by": u["user_id"],"delegated_by": u["user_id"],"allowed_document_types": sorted(requested)}).execute()
+    notify(target_uid, "Case access granted", f"{u['full_name']} granted you {req.permission_level} access to case {req.case_id}. Documents: {', '.join(sorted(requested))}.", "case_access_granted", case_id=req.case_id)
+    return {"success": True, "message": f"{req.employee_id} added to the case."}
 
-    requested = set(req.allowed_document_types)
-    available = set(inviter.get("allowed_document_types") or [])
-    if not requested or not requested.issubset(available):
-        raise HTTPException(
-            403,
-            f"You can grant only document types you have: {sorted(available)}"
-        )
+class ExternalCaseInviteRequest(BaseModel):
+    case_id: str
+    name: str
+    email: str
+    organization_name: str = ""
+    organization_type: str = "other"
+    role: str = "external_participant"
+    purpose: str = ""
+    permission_level: str = "read"
+    allowed_document_types: list[str]
+    expires_hours: int = 72
 
-    try:
-        target = (
-            supabase.table("users").select("user_id")
-            .eq("employee_id", req.employee_id).limit(1).execute()
-        )
-        if not target.data:
-            raise HTTPException(
-                404,
-                "That employee does not have an app account yet. Invite them from the homepage first."
-            )
-        target_uid = target.data[0]["user_id"]
+@app.post("/case/invite-external")
+def invite_external(req: ExternalCaseInviteRequest, authorization: str | None = Header(default=None)):
+    u = get_current_user(authorization)
+    if not u["is_elevated"]: raise HTTPException(403, "Complete authenticator 2FA before inviting an external participant.")
+    inviter = membership(u["user_id"], req.case_id)
+    if inviter["permission_level"] != "grant": raise HTTPException(403, "You don't have grant permission on this case.")
+    if req.organization_type not in EXTERNAL_ORGANIZATION_TYPES: raise HTTPException(400, "Invalid external organization type.")
+    if req.permission_level not in {"read", "upload", "sign"}: raise HTTPException(400, "Invalid external permission level.")
+    requested = set(req.allowed_document_types); available = set(inviter.get("allowed_document_types") or [])
+    if not requested or not requested.issubset(available): raise HTTPException(403, "You can grant only document types you are allowed to grant.")
+    if not req.name.strip() or "@" not in req.email: raise HTTPException(400, "Valid external participant name and email are required.")
+    token = secrets.token_urlsafe(32); token_hash = hashlib.sha256(token.encode()).hexdigest(); expires = now() + timedelta(hours=max(1, min(req.expires_hours, 168)))
+    existing = supabase.table("external_case_participants").select("participant_id").eq("case_id", req.case_id).ilike("email", req.email.strip()).eq("status", "active").limit(1).execute()
+    if existing.data: raise HTTPException(400, "This external participant already has active access to this case.")
+    created = supabase.table("external_case_participants").insert({
+        "case_id": req.case_id, "invited_by": u["user_id"], "name": req.name.strip(), "email": req.email.strip(),
+        "organization_name": req.organization_name.strip(), "organization_type": req.organization_type,
+        "role": req.role.strip() or "external_participant", "purpose": req.purpose.strip(),
+        "allowed_document_types": sorted(requested), "permission_level": req.permission_level,
+        "status": "invited", "invitation_token_hash": token_hash, "expires_at": iso(expires)
+    }).execute()
+    link = f"{FRONTEND_URL}/external-portal.html?token={token}"
+    send_email(req.email.strip(), req.name.strip(), link)
+    return {"success": True, "message": f"External invitation sent to {req.name.strip()}.", "participant_id": created.data[0]["participant_id"] if created.data else None}
 
-        existing = (
-            supabase.table("case_membership").select("membership_id")
-            .eq("case_id", req.case_id).eq("user_id", target_uid)
-            .limit(1).execute()
-        )
-        if existing.data:
-            raise HTTPException(400, "This person already has access to this case.")
+class ExternalTokenRequest(BaseModel):
+    token: str
 
-        supabase.table("case_membership").insert({
-            "user_id": target_uid,
-            "case_id": req.case_id,
-            "permission_level": req.permission_level,
-            "granted_by": u["user_id"],
-            "delegated_by": u["user_id"],
-            "allowed_document_types": sorted(requested),
-        }).execute()
+@app.get("/external/invite")
+def external_invite(token: str):
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    r = supabase.table("external_case_participants").select("participant_id,case_id,name,email,organization_name,organization_type,role,purpose,allowed_document_types,permission_level,status,expires_at").eq("invitation_token_hash", token_hash).limit(1).execute()
+    if not r.data: raise HTTPException(404, "Invitation not found or invalid.")
+    x = r.data[0]
+    if x.get("status") in {"revoked", "expired", "completed"}: raise HTTPException(403, f"This invitation is {x['status']}.")
+    if x.get("expires_at") and now() > parse_dt(x["expires_at"]):
+        supabase.table("external_case_participants").update({"status":"expired"}).eq("participant_id", x["participant_id"]).execute()
+        raise HTTPException(403, "This invitation has expired.")
+    return {k:x.get(k) for k in ["participant_id","case_id","name","email","organization_name","organization_type","role","purpose","allowed_document_types","permission_level","status","expires_at"]}
 
-        # Immediate notification; the SQL trigger is also supplied as a
-        # fallback/audit layer, so duplicate notifications may be avoided by
-        # using either one, not both. Here we use application notification.
-        notify(
-            target_uid,
-            "Case access granted",
-            f"{u['full_name']} granted you {req.permission_level} access to case {req.case_id}. "
-            f"Documents: {', '.join(sorted(requested))}.",
-            "case_access_granted",
-            case_id=req.case_id,
-        )
+@app.post("/external/accept")
+def external_accept(req: ExternalTokenRequest):
+    token_hash = hashlib.sha256(req.token.encode()).hexdigest()
+    r = supabase.table("external_case_participants").select("participant_id,status,expires_at").eq("invitation_token_hash", token_hash).limit(1).execute()
+    if not r.data: raise HTTPException(404, "Invitation not found.")
+    x=r.data[0]
+    if x.get("expires_at") and now() > parse_dt(x["expires_at"]): raise HTTPException(403,"This invitation has expired.")
+    if x["status"] not in {"invited","active"}: raise HTTPException(403,"This invitation is no longer active.")
+    supabase.table("external_case_participants").update({"status":"active","accepted_at":iso(now())}).eq("participant_id",x["participant_id"]).execute()
+    return {"success":True,"participant_id":x["participant_id"],"token":req.token}
 
-        return {"success": True, "message": f"{req.employee_id} added to the case."}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(500, f"Case invitation failed: {error_text(exc)}")
+@app.post("/external/documents/upload")
+async def external_upload(token: str = Form(...), file: UploadFile = File(...), document_type: str = Form(...)):
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    pr = supabase.table("external_case_participants").select("participant_id,case_id,allowed_document_types,permission_level,status,expires_at").eq("invitation_token_hash", token_hash).limit(1).execute()
+    if not pr.data: raise HTTPException(401,"Invalid external access token.")
+    p=pr.data[0]
+    if p["status"] != "active": raise HTTPException(403,"External access is not active.")
+    if p.get("expires_at") and now() > parse_dt(p["expires_at"]): raise HTTPException(403,"External access has expired.")
+    if p["permission_level"] not in {"upload","sign"}: raise HTTPException(403,"This external participant cannot upload.")
+    document_type=document_type.strip().lower()
+    if document_type not in set(p.get("allowed_document_types") or []): raise HTTPException(403,"This document type is not allowed.")
+    if not file.filename: raise HTTPException(400,"Filename missing.")
+    data=await file.read()
+    if not data or len(data)>MAX_FILE_SIZE: raise HTTPException(400,"Invalid or oversized file.")
+    ext=Path(file.filename).suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS: raise HTTPException(400,"Unsupported file type.")
+    h=calculate_file_hash(data)
+    # External submissions are attributable to the participant. For this prototype they are integrity-hashed and stored;
+    # an internal signing identity can be added when the external organization has a managed account.
+    existing=supabase.table("documents").select("document_id,current_version_id,file_type").eq("case_id",p["case_id"]).eq("document_type",document_type).order("created_at",desc=False).limit(1).execute()
+    if existing.data:
+        did=existing.data[0]["document_id"]
+        latest=supabase.table("document_versions").select("version_number,file_hash").eq("document_id",did).order("version_number",desc=True).limit(1).execute()
+        lv=latest.data[0] if latest.data else None; vn=int(lv.get("version_number") or 1)+1 if lv else 1; prev=lv.get("file_hash") if lv else None
+    else:
+        dr=supabase.table("documents").insert({"case_id":p["case_id"],"document_type":document_type,"file_type":"image" if ext in {".jpg",".jpeg",".png"} else "text","uploader_id":None}).execute()
+        if not dr.data: raise HTTPException(500,"Could not create document.")
+        did=dr.data[0]["document_id"]; vn=1; prev=None
+    vid=str(uuid.uuid4()); safe=os.path.basename(file.filename).replace("/","_").replace("\\","_"); path=f"{p['case_id']}/{did}/v{vn}/{vid}_{safe}"
+    ctype=file.content_type or mimetypes.guess_type(file.filename)[0] or "application/octet-stream"
+    supabase.storage.from_(DOCUMENT_BUCKET).upload(path,data,{"content-type":ctype,"upsert":False})
+    supabase.table("document_versions").insert({"version_id":vid,"document_id":did,"storage_path":path,"file_hash":h,"previous_version_hash":prev,"version_number":vn,"signing_key_id":None,"signature":"EXTERNAL_HASH_ONLY","co_signature":None,"uploader_id":None,"timestamp":iso(now())}).execute()
+    supabase.table("documents").update({"current_version_id":vid}).eq("document_id",did).execute()
+    return {"success":True,"message":f"Uploaded as Version {vn}.","version_number":vn,"document_id":did,"version_id":vid,"file_hash":h}
 
-
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("invite_backend:app", host="127.0.0.1", port=8000, reload=True)
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
