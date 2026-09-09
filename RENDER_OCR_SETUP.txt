@@ -1,0 +1,17 @@
+# Render
+# Runtime: Python 3.11
+#
+# Build Command:
+#   pip install -r requirements_sih_ocr_option3.txt && python warmup_ocr.py
+#
+# Start Command:
+#   uvicorn invite_backend:app --host 0.0.0.0 --port $PORT
+#
+# Environment variables:
+#   OCR_VERSION=PP-OCRv5
+#   OCR_LANG=en
+#   OCR_DEVICE=cpu
+#   OCR_CPU_THREADS=4
+#
+# IMPORTANT:
+# Run one Uvicorn worker. Each worker loads its own OCR model into RAM.

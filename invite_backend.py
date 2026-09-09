@@ -1,5 +1,6 @@
+
 """
-SIH Secure DMS - unified backend v10
+SIH Secure DMS - secure document management backend
 
 Run:
     python -m uvicorn invite_backend:app --reload --port 8000
@@ -127,7 +128,7 @@ def get_current_user(authorization: str | None):
     try:
         sr = (
             supabase.table("sessions")
-            .select("session_id,user_id,expires_at,elevated_until")
+            .select("session_id,user_id,expires_at,elevated_until,elevated_purpose")
             .eq("token_hash", token_hash)
             .limit(1).execute()
         )
@@ -194,7 +195,16 @@ def get_current_user(authorization: str | None):
         "can_delegate": bool(admin.data and admin.data[0].get("can_delegate")),
         "has_2fa": bool(user.get("totp_secret")),
         "is_elevated": elevated,
+        "elevated_purpose": session.get("elevated_purpose"),
     }
+
+
+def require_elevated(u, action, purpose=None):
+    """Require a recent OTP elevation for the specific sensitive action."""
+    if not u.get("is_elevated"):
+        raise HTTPException(403, f"Email OTP verification is required for {action}.")
+    if purpose and u.get("elevated_purpose") != purpose:
+        raise HTTPException(403, f"A fresh email OTP is required for {action}.")
 
 
 @app.get("/health")
@@ -540,7 +550,8 @@ def verify_email_otp(
     # /case/invite accept the same verified factor.
     try:
         supabase.table("sessions").update({
-            "elevated_until": iso(now() + timedelta(minutes=15))
+            "elevated_until": iso(now() + timedelta(minutes=15)),
+            "elevated_purpose": req.purpose,
         }).eq("session_id", u["session_id"]).execute()
     except Exception as exc:
         raise HTTPException(500, f"OTP verified, but security elevation failed: {error_text(exc)}")
@@ -1213,6 +1224,7 @@ def case_documents(
     authorization: str | None = Header(default=None),
 ):
     u = get_current_user(authorization)
+    require_elevated(u, "viewing case files", "VIEW_FILES")
     m = membership(u["user_id"], case_id)
     allowed = set(m.get("allowed_document_types") or [])
     try:
@@ -1251,6 +1263,7 @@ def case_documents(
 @app.get("/documents/versions/{document_id}")
 def document_versions(document_id: str, authorization: str | None = Header(default=None)):
     u = get_current_user(authorization)
+    require_elevated(u, "viewing document versions", "VIEW_FILES")
     dr = supabase.table("documents").select("document_id,case_id,document_type").eq("document_id", document_id).limit(1).execute()
     if not dr.data:
         raise HTTPException(404, "Document not found.")
@@ -1270,6 +1283,7 @@ def document_file(
     authorization: str | None = Header(default=None),
 ):
     u = get_current_user(authorization)
+    require_elevated(u, "opening case files", "VIEW_FILES")
     try:
         vr = (
             supabase.table("document_versions")
@@ -1313,6 +1327,7 @@ def document_file(
 @app.get("/documents/verify/{version_id}")
 def verify_document(version_id: str, authorization: str | None = Header(default=None)):
     u = get_current_user(authorization)
+    require_elevated(u, "verifying document integrity", "VIEW_FILES")
     try:
         vr = supabase.table("document_versions").select(
             "version_id,document_id,storage_path,file_hash,signature,uploader_id,version_number,previous_version_hash,signing_key_id"
@@ -1586,6 +1601,130 @@ def case_invite(req: CaseInviteRequest, authorization: str | None = Header(defau
     notify(target_uid, "Case access granted", f"{u['full_name']} granted you {req.permission_level} access to case {req.case_id}. Documents: {', '.join(sorted(requested))}.", "case_access_granted", case_id=req.case_id)
     return {"success": True, "message": f"{req.employee_id} added to the case."}
 
+
+# --------------------------- SELF-HOSTED OCR ---------------------------
+#
+# OCR is intentionally kept separate from the document's immutable bytes.
+# The original file is never modified by OCR.
+#
+from ocr_engine import run_ocr as _self_hosted_run_ocr
+
+
+def _run_ocr(data: bytes, filename: str, language: str = "eng") -> dict:
+    """
+    Self-hosted OCR using PaddleOCR PP-OCRv5.
+
+    PP-OCRv5 supports general OCR and challenging handwriting scenarios.
+    The language argument is retained for frontend compatibility; the
+    deployed model is selected through OCR_LANG.
+    """
+    try:
+        return _self_hosted_run_ocr(data, filename)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Self-hosted OCR failed: {error_text(exc)}") from exc
+
+
+@app.get("/ocr/health")
+def ocr_health():
+    """Lightweight status endpoint; model is loaded only when OCR is used."""
+    try:
+        from ocr_engine import _OCR
+        return {
+            "available": _OCR is not None,
+            "engine": "PaddleOCR PP-OCRv5 (self-hosted)",
+            "handwriting_supported": True,
+        }
+    except Exception:
+        return {
+            "available": False,
+            "engine": "PaddleOCR PP-OCRv5 (self-hosted)",
+            "handwriting_supported": True,
+        }
+
+
+@app.post("/ocr/extract")
+async def ocr_extract(
+    file: UploadFile = File(...),
+    language: str = Form("eng"),
+    authorization: str | None = Header(default=None),
+):
+    u = get_current_user(authorization)
+    require_elevated(u, "OCR processing", "VIEW_FILES")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "The uploaded file is empty.")
+    if len(data) > MAX_FILE_SIZE:
+        raise HTTPException(413, "File is too large for OCR.")
+
+    result = _run_ocr(data, file.filename or "document", language)
+    return {
+        "filename": file.filename,
+        "language": language,
+        **result,
+        "characters": len(result["text"]),
+    }
+
+
+@app.post("/documents/ocr/{version_id}")
+def ocr_stored_document(
+    version_id: str,
+    language: str = Form("eng"),
+    authorization: str | None = Header(default=None),
+):
+    u = get_current_user(authorization)
+    require_elevated(u, "OCR processing", "VIEW_FILES")
+
+    try:
+        vr = (
+            supabase.table("document_versions")
+            .select("version_id,document_id,storage_path")
+            .eq("version_id", version_id)
+            .limit(1)
+            .execute()
+        )
+        if not vr.data:
+            raise HTTPException(404, "Document version not found.")
+
+        v = vr.data[0]
+        dr = (
+            supabase.table("documents")
+            .select("document_id,case_id,document_type")
+            .eq("document_id", v["document_id"])
+            .limit(1)
+            .execute()
+        )
+        if not dr.data:
+            raise HTTPException(404, "Document not found.")
+
+        d = dr.data[0]
+        m = membership(u["user_id"], d["case_id"])
+        if d["document_type"] not in set(m.get("allowed_document_types") or []):
+            raise HTTPException(403, "You are not authorized to OCR this document.")
+
+        data = supabase.storage.from_(DOCUMENT_BUCKET).download(v["storage_path"])
+        result = _run_ocr(data, Path(v["storage_path"]).name, language)
+
+        return {
+            "version_id": version_id,
+            "document_type": d["document_type"],
+            "language": language,
+            **result,
+            "characters": len(result["text"]),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            500, f"Could not OCR stored document: {error_text(exc)}"
+        )
+
+
 class ExternalCaseInviteRequest(BaseModel):
     case_id: str
     name: str
@@ -1690,4 +1829,3 @@ if __name__ == "__main__":
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-

@@ -1,0 +1,18 @@
+# SIH Secure DMS - production dependencies
+fastapi
+uvicorn[standard]
+supabase
+bcrypt
+pyotp
+python-dotenv
+cryptography
+reportlab
+pydantic
+python-multipart
+
+# Self-hosted OCR
+pillow
+numpy
+pymupdf
+paddlepaddle==3.2.0
+paddleocr==3.5.0

@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: alliance
+    env: python
+    buildCommand: pip install -r requirements_sih_ocr_option3.txt && python warmup_ocr.py
+    startCommand: uvicorn invite_backend:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: OCR_VERSION
+        value: PP-OCRv5
+      - key: OCR_LANG
+        value: en
+      - key: OCR_DEVICE
+        value: cpu
+      - key: OCR_CPU_THREADS
+        value: "4"
