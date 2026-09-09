@@ -1219,7 +1219,7 @@ def case_documents(
         r = (
             supabase.table("documents")
             .select("document_id,case_id,document_type,file_type,uploader_id,current_version_id")
-            .eq("case_id", case_id).order("created_at", desc=False).execute()
+            .eq("case_id", case_id).order("document_type", desc=False).execute()
         )
         visible = []
         for d in r.data or []:
@@ -1442,7 +1442,7 @@ async def upload_document(
         signed = sign_file_hash(u["user_id"], h, supabase)
 
         # One logical document per CASE + DOCUMENT TYPE.
-        existing = supabase.table("documents").select("document_id,current_version_id,file_type,uploader_id").eq("case_id", case_id).eq("document_type", document_type).order("created_at", desc=False).limit(1).execute()
+        existing = supabase.table("documents").select("document_id,current_version_id,file_type,uploader_id").eq("case_id", case_id).eq("document_type", document_type).limit(1).execute()
         if existing.data:
             did = existing.data[0]["document_id"]
             versions = supabase.table("document_versions").select("version_id,version_number,file_hash").eq("document_id", did).order("version_number", desc=True).limit(1).execute()
@@ -1668,7 +1668,7 @@ async def external_upload(token: str = Form(...), file: UploadFile = File(...), 
     h=calculate_file_hash(data)
     # External submissions are attributable to the participant. For this prototype they are integrity-hashed and stored;
     # an internal signing identity can be added when the external organization has a managed account.
-    existing=supabase.table("documents").select("document_id,current_version_id,file_type").eq("case_id",p["case_id"]).eq("document_type",document_type).order("created_at",desc=False).limit(1).execute()
+    existing=supabase.table("documents").select("document_id,current_version_id,file_type").eq("case_id",p["case_id"]).eq("document_type",document_type).limit(1).execute()
     if existing.data:
         did=existing.data[0]["document_id"]
         latest=supabase.table("document_versions").select("version_number,file_hash").eq("document_id",did).order("version_number",desc=True).limit(1).execute()
