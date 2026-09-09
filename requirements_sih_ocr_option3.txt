@@ -1,4 +1,3 @@
-# SIH Secure DMS - production dependencies
 fastapi
 uvicorn[standard]
 supabase
@@ -9,8 +8,6 @@ cryptography
 reportlab
 pydantic
 python-multipart
-
-# Self-hosted OCR
 pillow
 numpy
 pymupdf
