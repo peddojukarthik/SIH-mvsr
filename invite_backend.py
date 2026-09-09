@@ -1,4 +1,3 @@
-
 """
 SIH Secure DMS - unified backend v10
 
@@ -16,10 +15,9 @@ This version keeps the existing session/TOTP/key/document model, but fixes:
 - no separate invite page is required
 """
 
-import os, secrets, hashlib, smtplib, mimetypes, uuid
+import os, secrets, hashlib, mimetypes, uuid, json, urllib.request, urllib.error
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from email.mime.text import MIMEText
 
 import bcrypt
 import pyotp
@@ -56,8 +54,11 @@ supabase = create_client(
     os.environ["SUPABASE_SERVICE_ROLE_KEY"],
 )
 
-GMAIL_ADDRESS = os.environ["GMAIL_ADDRESS"]
-GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
+# Email is sent through Resend.
+# Required on Render: RESEND_API_KEY
+# Optional: RESEND_FROM_EMAIL (must be a verified sender/domain in Resend).
+RESEND_API_KEY = os.environ["RESEND_API_KEY"]
+RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "onboarding@resend.dev")
 
 # Email links must point to a real HTTP page.
 # For local development this is the backend's activate-page.
@@ -395,20 +396,64 @@ class EmailOTPVerifyRequest(BaseModel):
     code: str
 
 
+def _resend_send(to_email: str, subject: str, text: str, html: str | None = None):
+    """Send an email through the Resend HTTP API.
+
+    This avoids SMTP completely, which is important for the Render deployment.
+    """
+    payload = {
+        "from": RESEND_FROM_EMAIL,
+        "to": [to_email],
+        "subject": subject,
+        "text": text,
+    }
+    if html:
+        payload["html"] = html
+
+    request = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+            "User-Agent": "SIH-Secure-DMS/1.0",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            response_body = response.read().decode("utf-8", errors="replace")
+            if response.status < 200 or response.status >= 300:
+                raise RuntimeError(f"Resend returned HTTP {response.status}: {response_body}")
+            return json.loads(response_body) if response_body else {}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Resend email failed (HTTP {exc.code}): {body}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Could not reach Resend: {exc.reason}") from exc
+
+
 def send_otp_email(to_email, name, code):
-    msg = MIMEText(
+    text = (
         f"Hello {name},\n\n"
         f"Your Secure DMS verification code is: {code}\n"
         f"It expires in {EMAIL_OTP_MINUTES} minutes.\n\n"
         "If you did not request this code, ignore this email."
     )
-    msg["Subject"] = "Secure DMS verification code"
-    msg["From"] = GMAIL_ADDRESS
-    msg["To"] = to_email
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-        server.sendmail(GMAIL_ADDRESS, [to_email], msg.as_string())
+    html = (
+        f"<p>Hello {name},</p>"
+        f"<p>Your <strong>Secure DMS</strong> verification code is "
+        f"<strong style=\"font-size:24px;letter-spacing:4px;\">{code}</strong>.</p>"
+        f"<p>This code expires in {EMAIL_OTP_MINUTES} minutes.</p>"
+        "<p>If you did not request this code, ignore this email.</p>"
+    )
+    return _resend_send(
+        to_email,
+        "Secure DMS verification code",
+        text,
+        html,
+    )
 
 
 @app.post("/security/request-otp")
@@ -657,20 +702,26 @@ def invite(req: InviteRequest, authorization: str | None = Header(default=None))
 
 
 def send_email(to_email: str, full_name: str, activation_link: str):
-    body = (
+    text = (
         f"Hi {full_name},\n\n"
         "You have been invited to Secure DMS.\n\n"
         "Activate your account using this link (valid 72 hours):\n"
         f"{activation_link}\n\n"
         "After activation, log in and complete your profile."
     )
-    msg = MIMEText(body)
-    msg["Subject"] = "Activate your Secure DMS account"
-    msg["From"] = GMAIL_ADDRESS
-    msg["To"] = to_email
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-        server.sendmail(GMAIL_ADDRESS, [to_email], msg.as_string())
+    html = (
+        f"<p>Hi {full_name},</p>"
+        "<p>You have been invited to <strong>Secure DMS</strong>.</p>"
+        "<p>Activate your account using this link (valid 72 hours):</p>"
+        f"<p><a href=\"{activation_link}\">Activate your account</a></p>"
+        "<p>After activation, log in and complete your profile.</p>"
+    )
+    return _resend_send(
+        to_email,
+        "Activate your Secure DMS account",
+        text,
+        html,
+    )
 
 
 # --------------------------- ACTIVATION / PROFILE ---------------------------
@@ -1639,3 +1690,4 @@ if __name__ == "__main__":
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
