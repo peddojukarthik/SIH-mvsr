@@ -298,7 +298,7 @@ def login(req: dict):
             "expires_at": iso(now() + timedelta(hours=SESSION_LIFETIME_HOURS)),
         }).execute()
         # Every user gets a signing key on first login.
-        ensure_user_key(user["user_id"])
+        ensure_user_key(user["user_id"], supabase)
     except HTTPException:
         raise
     except Exception as exc:
@@ -945,7 +945,7 @@ def create_case(
     # Make sure this user has a persistent signing key.
     # ------------------------------------------------------------
 
-    ensure_user_key(current_user["user_id"])
+    ensure_user_key(current_user["user_id"], supabase)
 
     # sign_file_hash now retrieves/decrypts the private key
     # from Supabase instead of reading ./private_keys.
@@ -1365,7 +1365,7 @@ async def upload_document(
     try:
         ft = "image" if ext in {".jpg", ".jpeg", ".png"} else "text"
         h = calculate_file_hash(data)
-        ensure_user_key(u["user_id"])
+        ensure_user_key(u["user_id"], supabase)
         sig = sign_file_hash(u["user_id"], h)
 
         dr = supabase.table("documents").insert({
