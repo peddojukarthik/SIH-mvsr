@@ -964,24 +964,24 @@ def create_case(
 
     case_id = case_result.data[0]["case_id"]
 
-    # The department head is a default member of every case. In the
-    # current SIH schema, department_admins with can_delegate are the
-    # head/management users. If no such user exists, the FIR filer is
-    # the safe fallback head so the case never becomes ownerless.
+    # The department Head is a default member of every case. In the existing
+    # SIH schema, department_admins.can_delegate identifies the designated
+    # Head/management account. If no Head is configured, the FIR filer is the
+    # safe fallback so the case never becomes ownerless.
     head_user_id = current_user["user_id"]
     try:
         hr = (supabase.table("department_admins")
               .select("user_id")
               .eq("department_id", current_user["department_id"])
-              .eq("can_delegate", True).limit(1).execute())
+              .eq("can_delegate", True)
+              .limit(1).execute())
         if hr.data and hr.data[0].get("user_id"):
             head_user_id = hr.data[0]["user_id"]
     except Exception:
         pass
-    try:
-        supabase.table("cases").update({"head_user_id": head_user_id}).eq("case_id", case_id).execute()
-    except Exception:
-        pass
+    supabase.table("cases").update({"head_user_id": head_user_id}).eq(
+        "case_id", case_id
+    ).execute()
 
     # ------------------------------------------------------------
     # Give the FIR creator full case-management permission.
@@ -1756,11 +1756,61 @@ def _process_ai_job(version_id: str):
                 pass
 
 
-def _is_case_head(user_id: str, case_id: str) -> bool:
-    r = supabase.table("cases").select("head_user_id,created_by").eq("case_id", case_id).limit(1).execute()
+def _get_case_head_user_id(case_id: str) -> str:
+    """Resolve the designated Head for a case.
+
+    The existing SIH schema uses department_admins.can_delegate to mark the
+    department Head/management account.  head_user_id is a cached case-level
+    value, but older cases may contain a stale value, so we resolve the Head
+    from the case creator's department and repair the cached value when needed.
+    """
+    r = (supabase.table("cases")
+         .select("case_id,head_user_id,created_by")
+         .eq("case_id", case_id).limit(1).execute())
     if not r.data:
         raise HTTPException(404, "Case not found.")
-    return user_id == (r.data[0].get("head_user_id") or r.data[0].get("created_by"))
+    case = r.data[0]
+
+    # Find the department that owns the case through the FIR creator.
+    creator = (supabase.table("users")
+               .select("user_id,employee_registry!fk_users_employee(department_id)")
+               .eq("user_id", case["created_by"]).limit(1).execute())
+    department_id = None
+    if creator.data:
+        registry = creator.data[0].get("employee_registry") or {}
+        department_id = registry.get("department_id")
+
+    resolved_head = None
+    if department_id:
+        try:
+            hr = (supabase.table("department_admins")
+                  .select("user_id")
+                  .eq("department_id", department_id)
+                  .eq("can_delegate", True)
+                  .limit(1).execute())
+            if hr.data:
+                resolved_head = hr.data[0].get("user_id")
+        except Exception:
+            resolved_head = None
+
+    # Never leave a case without a Head. If the department has no designated
+    # Head/admin, the FIR creator remains the safe fallback.
+    resolved_head = resolved_head or case.get("head_user_id") or case["created_by"]
+
+    # Repair stale/missing cached ownership for existing cases.
+    if case.get("head_user_id") != resolved_head:
+        try:
+            supabase.table("cases").update({"head_user_id": resolved_head}).eq(
+                "case_id", case_id
+            ).execute()
+        except Exception:
+            pass
+
+    return resolved_head
+
+
+def _is_case_head(user_id: str, case_id: str) -> bool:
+    return user_id == _get_case_head_user_id(case_id)
 
 
 class CaseAIToggleRequest(BaseModel):
@@ -1781,10 +1831,21 @@ def case_ai_status(case_id: str, authorization: str | None = Header(default=None
     if not r.data:
         raise HTTPException(404, "Case not found.")
     c = r.data[0]
+    head_user_id = _get_case_head_user_id(case_id)
+    head_name = None
+    try:
+        hr = (supabase.table("users")
+              .select("employee_registry!fk_users_employee(full_name)")
+              .eq("user_id", head_user_id).limit(1).execute())
+        if hr.data:
+            head_name = (hr.data[0].get("employee_registry") or {}).get("full_name")
+    except Exception:
+        pass
     pending = supabase.table("case_ai_documents").select("ai_document_id", count="exact").eq("case_id", case_id).in_("status", ["pending","processing"]).execute()
     return {
         "enabled": bool(c.get("ai_enabled")),
-        "is_head": _is_case_head(u["user_id"], case_id),
+        "is_head": u["user_id"] == head_user_id,
+        "head_name": head_name,
         "provider": c.get("ai_provider") or "ollama",
         "model": c.get("ai_model") or AI_OLLAMA_MODEL,
         "pending_count": pending.count or 0,

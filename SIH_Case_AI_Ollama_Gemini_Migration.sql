@@ -9,23 +9,25 @@ ALTER TABLE public.cases ADD COLUMN IF NOT EXISTS ai_enabled_at timestamptz;
 ALTER TABLE public.cases ADD COLUMN IF NOT EXISTS ai_provider text;
 ALTER TABLE public.cases ADD COLUMN IF NOT EXISTS ai_model text;
 
--- Populate existing cases. Prefer a department admin who can delegate;
--- otherwise the existing case creator remains the fallback head.
+-- Repair existing cases and assign the actual Department Head.
+-- In this SIH schema, department_admins.can_delegate marks the designated
+-- Head/management account for a department. The FIR filer is only the
+-- fallback when no designated Head exists.
 UPDATE public.cases c
 SET head_user_id = COALESCE(
     (
         SELECT da.user_id
-        FROM public.users u
-        JOIN public.employee_registry er ON er.employee_id = u.employee_id
+        FROM public.users creator
+        JOIN public.employee_registry er
+          ON er.employee_id = creator.employee_id
         JOIN public.department_admins da
           ON da.department_id = er.department_id
          AND da.can_delegate = true
-        WHERE u.user_id = c.created_by
+        WHERE creator.user_id = c.created_by
         LIMIT 1
     ),
     c.created_by
-)
-WHERE c.head_user_id IS NULL;
+);
 
 DO $$
 BEGIN
