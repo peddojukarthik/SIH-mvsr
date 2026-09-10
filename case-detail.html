@@ -12,7 +12,7 @@ body{font-family:system-ui;max-width:900px;margin:25px auto;padding:0 18px;backg
 button{border:0;border-radius:8px;padding:10px 14px;background:#2563eb;color:#fff;cursor:pointer;margin:4px 0}
 .green{background:#047857}.gray{background:#475569}
 input,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #cbd5e1;border-radius:8px;margin:6px 0 10px}
-.file,.member,.result{padding:13px 0;border-bottom:1px solid #e5e7eb}.meta{color:#64748b;font-size:.85rem} .file-title{font-size:1.05rem;font-weight:700}.version-badge{display:inline-block;margin-left:8px;padding:3px 8px;border-radius:999px;background:#e2e8f0;color:#334155;font-size:.78rem;font-weight:600}.ocr-result{margin-top:10px;padding:12px;border-radius:8px;background:#f8fafc;border:1px solid #e2e8f0;white-space:pre-wrap;line-height:1.5;max-height:320px;overflow:auto}.ocr-result.loading{color:#64748b}.ocr-result.error{background:#fef2f2;color:#991b1b}.ocr-result.success{background:#ecfdf5;color:#065f46}
+.file,.member,.result{padding:13px 0;border-bottom:1px solid #e5e7eb}.meta{color:#64748b;font-size:.85rem} .file-title{font-size:1.05rem;font-weight:700}.version-badge{display:inline-block;margin-left:8px;padding:3px 8px;border-radius:999px;background:#e2e8f0;color:#334155;font-size:.78rem;font-weight:600}.ocr-result{margin-top:10px;padding:12px;border-radius:8px;background:#f8fafc;border:1px solid #e2e8f0;white-space:pre-wrap;line-height:1.5;max-height:320px;overflow:auto}.ocr-result.loading{color:#64748b}.ocr-result.error{background:#fef2f2;color:#991b1b}.ocr-result.success{background:#ecfdf5;color:#065f46}.integrity{margin:10px 0;padding:10px 12px;border-radius:8px;font-weight:600}.integrity.ok{background:#ecfdf5;color:#065f46}.integrity.warn{background:#fff7ed;color:#9a3412}.integrity.bad{background:#fef2f2;color:#991b1b}.ocr-confidence{font-size:.85rem;color:#475569;margin-bottom:6px}.ocr-text{white-space:pre-wrap;line-height:1.55;background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:12px;max-height:360px;overflow:auto}.actions{display:flex;gap:8px;flex-wrap:wrap}
 .hash{font-family:monospace;font-size:.72rem;word-break:break-all;background:#f1f5f9;padding:8px;border-radius:6px}
 .modal{display:none;position:fixed;inset:0;background:#0008;align-items:center;justify-content:center}.box{background:#fff;padding:24px;border-radius:14px;width:min(520px,92vw)}
 .status{padding:10px;border-radius:8px;margin-top:8px;white-space:pre-wrap}.error{background:#fef2f2;color:#991b1b}.success{background:#ecfdf5;color:#065f46}
@@ -50,7 +50,9 @@ a{color:#2563eb}
 </div>
 
 <script>
-const API = "https://alliance-cqnf.onrender.com";
+const API = (location.hostname === "localhost" || location.hostname === "127.0.0.1")
+    ? "http://127.0.0.1:8000"
+    : "https://alliance-cqnf.onrender.com";
 const token = sessionStorage.getItem("token");
 const H = {"Authorization":"Bearer " + token};
 
@@ -162,88 +164,121 @@ document.getElementById("membersBtn").addEventListener(
 async function showFiles() {
     try {
         const data = await api("/case/documents?case_id=" + encodeURIComponent(caseId));
+        const docs = Array.isArray(data.documents) ? data.documents : [];
+        const warnings = docs.filter(x => x.integrity && x.integrity.status !== "VERIFIED");
 
         panelEl.innerHTML = `
         <div class="card">
             <h2>Files for this case</h2>
-            ${
-                data.documents.length
-                ? data.documents.map(fileHtml).join("")
-                : `<p class="meta">No files visible to you.</p>`
-            }
+            ${warnings.length ? `
+                <div class="integrity bad">
+                    ⚠ Security warning: ${warnings.length} document${warnings.length > 1 ? "s" : ""} failed or could not complete an automatic integrity check. Review the warning shown on the affected document.
+                </div>` : `
+                <div class="integrity ok">✓ All displayed documents passed automatic integrity verification.</div>`}
+            ${docs.length ? docs.map(fileHtml).join("") : `<p class="meta">No files visible to you.</p>`}
         </div>`;
+
+        // OCR runs in the background after upload. Poll only records that are still processing.
+        docs.forEach(d => {
+            if (d.ocr?.status === "PROCESSING") pollOCR(d.version?.version_id);
+        });
     } catch (error) {
         panelEl.innerHTML = `<div class="status error">${esc(error.message)}</div>`;
     }
+}
+
+function integrityHtml(i) {
+    const status = i?.status || "UNKNOWN";
+    if (status === "VERIFIED") {
+        return `<div class="integrity ok">✓ Integrity verified automatically</div>`;
+    }
+    if (status === "WARNING") {
+        return `<div class="integrity warn">⚠ ${esc(i.message || "Integrity verification requires attention.")}</div>`;
+    }
+    return `<div class="integrity bad">⚠ ${esc(i?.message || "Integrity could not be verified.")}</div>`;
+}
+
+function ocrHtml(v, ocr) {
+    const status = ocr?.status || "NOT_STARTED";
+    const id = esc(v?.version_id || "");
+    if (status === "COMPLETED") {
+        const confidence = ocr.confidence == null ? "Not available" : `${(Number(ocr.confidence) * 100).toFixed(1)}%`;
+        const text = (ocr.extracted_text || "").trim();
+        return `
+            <div class="ocr-result success" id="ocr-${id}">
+                <b>Extracted Text · OCR Version ${esc(ocr.ocr_version || 1)}</b>
+                <div class="ocr-confidence">Confidence: ${esc(confidence)}</div>
+                <div class="ocr-text">${esc(text || "No text could be detected.")}</div>
+            </div>`;
+    }
+    if (status === "PROCESSING") {
+        return `<div class="ocr-result loading" id="ocr-${id}">Extracting text automatically…</div>`;
+    }
+    if (status === "FAILED") {
+        return `<div class="ocr-result error" id="ocr-${id}">OCR could not extract text from this document. The original file is unchanged.</div>`;
+    }
+    if (status === "NOT_CONFIGURED") {
+        return `<div class="ocr-result error" id="ocr-${id}">OCR storage is not configured yet.</div>`;
+    }
+    return `<div class="ocr-result loading" id="ocr-${id}">OCR will be processed automatically.</div>`;
 }
 
 function fileHtml(x) {
     const v = x.version || {};
     const versionNo = v.version_number || 1;
     const versionId = esc(v.version_id || "");
+    const canView = x.integrity?.status === "VERIFIED";
     return `
     <div class="file">
         <div class="file-title">Document <span class="version-badge">Version ${esc(versionNo)}</span></div>
         <div class="meta">Uploaded: ${esc(v.timestamp || "—")}</div>
+        ${integrityHtml(x.integrity)}
         <div class="actions">
-            <button data-view="${versionId}">Secure View</button>
-            <button class="green" data-ocr="${versionId}">Extract Text</button>
-            <button class="gray" data-verify="${versionId}">Verify Integrity</button>
+            ${canView
+                ? `<button data-view="${versionId}">View Original</button>`
+                : `<button disabled title="Viewing is blocked until integrity can be verified">View Original</button>`}
         </div>
-        <div id="ocr-${versionId}" class="ocr-result" hidden></div>
+        ${ocrHtml(v, x.ocr)}
     </div>`;
 }
 
 async function viewFile(id) {
+    // Open a tab immediately so browser popup blockers do not reject the async response.
+    const tab = window.open("about:blank", "_blank");
     try {
-        const data = await api("/documents/file/" + encodeURIComponent(id));
-        window.open(data.url, "_blank", "noopener");
-    } catch (error) { alert(error.message); }
-}
-
-async function verifyFile(id) {
-    try {
-        const data = await api("/documents/verify/" + encodeURIComponent(id));
-        alert(
-            (data.valid ? "✓ VERIFIED" : "✗ INVALID") +
-            "\\n\\nHash valid: " + data.hash_valid +
-            "\\nSignature valid: " + data.signature_valid +
-            "\\n\\nStored: " + data.stored_hash +
-            "\\nActual: " + data.actual_hash
-        );
-    } catch (error) { alert(error.message); }
-}
-
-async function extractOCR(id, target) {
-    target.hidden = false;
-    target.className = "ocr-result loading";
-    target.textContent = "Extracting text…";
-    try {
-        const data = await api("/documents/ocr/" + encodeURIComponent(id), {
-            method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"}, body:"language=eng"
-        });
-        target.className = "ocr-result success";
-        target.textContent = (data.text || "").trim() || "No text could be detected in this document.";
+        if (!tab) throw new Error("Please allow pop-ups for this site to view the document.");
+        const response = await fetch(API + "/documents/file/" + encodeURIComponent(id), {headers:H});
+        if (!response.ok) {
+            const raw = await response.text();
+            let data = {};
+            try { data = raw ? JSON.parse(raw) : {}; } catch { data = {detail:raw}; }
+            throw new Error("HTTP " + response.status + ": " + errText(data));
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        tab.location.href = url;
+        setTimeout(() => URL.revokeObjectURL(url), 120000);
     } catch (error) {
-        target.className = "ocr-result error";
-        target.textContent = "OCR failed: " + error.message;
+        if (tab && !tab.closed) tab.close();
+        alert("Document could not be opened.\n\n" + error.message);
     }
 }
 
-panelEl.addEventListener("click", function(event) {
-    const view = event.target.closest("[data-view]");
-    if (view) viewFile(view.dataset.view);
-
-    const verify = event.target.closest("[data-verify]");
-    if (verify) verifyFile(verify.dataset.verify);
-
-    const ocr = event.target.closest("[data-ocr]");
-    if (ocr) {
-        const id = ocr.dataset.ocr;
+async function pollOCR(id, tries=0) {
+    if (!id || tries > 45) return;
+    try {
+        const data = await api("/documents/ocr/" + encodeURIComponent(id));
         const target = document.getElementById("ocr-" + id);
-        if (target) extractOCR(id, target);
+        if (!target) return;
+        const v = {version_id:id};
+        target.outerHTML = ocrHtml(v, data);
+        if (data.status === "PROCESSING") {
+            setTimeout(() => pollOCR(id, tries + 1), 4000);
+        }
+    } catch (_) {
+        setTimeout(() => pollOCR(id, tries + 1), 5000);
     }
-});
+}
 
 function showUpload() {
     panelEl.innerHTML = `
