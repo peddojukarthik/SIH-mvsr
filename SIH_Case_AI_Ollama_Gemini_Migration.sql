@@ -9,25 +9,42 @@ ALTER TABLE public.cases ADD COLUMN IF NOT EXISTS ai_enabled_at timestamptz;
 ALTER TABLE public.cases ADD COLUMN IF NOT EXISTS ai_provider text;
 ALTER TABLE public.cases ADD COLUMN IF NOT EXISTS ai_model text;
 
--- Repair existing cases and assign the actual Department Head.
--- In this SIH schema, department_admins.can_delegate marks the designated
--- Head/management account for a department. The FIR filer is only the
--- fallback when no designated Head exists.
+-- Populate/repair existing cases using an explicit Department Head.
 UPDATE public.cases c
 SET head_user_id = COALESCE(
-    (
-        SELECT da.user_id
-        FROM public.users creator
-        JOIN public.employee_registry er
-          ON er.employee_id = creator.employee_id
-        JOIN public.department_admins da
-          ON da.department_id = er.department_id
-         AND da.can_delegate = true
-        WHERE creator.user_id = c.created_by
-        LIMIT 1
-    ),
+    (SELECT u.user_id
+     FROM public.users u
+     JOIN public.employee_registry er ON er.employee_id=u.employee_id
+     WHERE er.department_id=(SELECT er2.department_id FROM public.users u2 JOIN public.employee_registry er2 ON er2.employee_id=u2.employee_id WHERE u2.user_id=c.created_by LIMIT 1)
+       AND (lower(coalesce(er.rank,'')) LIKE '%department head%' OR lower(coalesce(er.designation,'')) LIKE '%department head%')
+     LIMIT 1),
+    (SELECT da.user_id
+     FROM public.department_admins da
+     WHERE da.department_id=(SELECT er2.department_id FROM public.users u2 JOIN public.employee_registry er2 ON er2.employee_id=u2.employee_id WHERE u2.user_id=c.created_by LIMIT 1)
+       AND da.can_delegate=true LIMIT 1),
     c.created_by
 );
+
+-- Explicit demo Head: Secunderabad Police
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+INSERT INTO public.departments (name,type,jurisdiction,official_email_domain)
+SELECT 'Secunderabad Police','police','Secunderabad, Hyderabad','demo.police'
+WHERE NOT EXISTS (SELECT 1 FROM public.departments WHERE name='Secunderabad Police');
+
+INSERT INTO public.employee_registry (employee_id,full_name,department_id,rank,designation,station_name,official_email,registry_status)
+SELECT 'SEC-PS-HEAD-001','Secunderabad Police Head',d.department_id,'Department Head','Department Head','Secunderabad Police','secunderabad.head@demo.police','verified'
+FROM public.departments d WHERE d.name='Secunderabad Police'
+AND NOT EXISTS (SELECT 1 FROM public.employee_registry WHERE employee_id='SEC-PS-HEAD-001');
+
+INSERT INTO public.users (employee_id,password_hash,account_status,must_change_password)
+SELECT 'SEC-PS-HEAD-001',crypt('Demo@1234',gen_salt('bf')),'active',false
+WHERE NOT EXISTS (SELECT 1 FROM public.users WHERE employee_id='SEC-PS-HEAD-001');
+
+INSERT INTO public.department_admins (user_id,department_id,can_invite_employees,can_delegate)
+SELECT u.user_id,d.department_id,true,true
+FROM public.users u JOIN public.departments d ON d.name='Secunderabad Police'
+WHERE u.employee_id='SEC-PS-HEAD-001'
+AND NOT EXISTS (SELECT 1 FROM public.department_admins da WHERE da.user_id=u.user_id AND da.department_id=d.department_id);
 
 DO $$
 BEGIN
