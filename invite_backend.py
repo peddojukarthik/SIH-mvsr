@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 import pyotp
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Form, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
@@ -71,13 +71,6 @@ ELEVATION_LIFETIME_MINUTES = 15
 EMAIL_OTP_MINUTES = 5
 DOCUMENT_BUCKET = os.getenv("DOCUMENT_BUCKET", "documents")
 MAX_FILE_SIZE = 50 * 1024 * 1024
-OCR_VERSION = os.getenv("OCR_VERSION", "PP-OCRv5")
-OCR_LANG = os.getenv("OCR_LANG", "en")
-OCR_DEVICE = os.getenv("OCR_DEVICE", "cpu")
-OCR_CPU_THREADS = int(os.getenv("OCR_CPU_THREADS", "4"))
-
-_OCR_ENGINE = None
-_OCR_ENGINE_ERROR = None
 
 ALLOWED_EXTENSIONS = {
     ".pdf", ".png", ".jpg", ".jpeg", ".doc", ".docx",
@@ -207,14 +200,11 @@ def get_current_user(authorization: str | None):
 
 
 def require_elevated(u, action, purpose=None):
-    """Require a recent OTP elevation for a sensitive action. Upload/member elevation also permits the related case view."""
+    """Require a recent OTP elevation for the specific sensitive action."""
     if not u.get("is_elevated"):
         raise HTTPException(403, f"Email OTP verification is required for {action}.")
-    current = u.get("elevated_purpose")
-    if purpose and current != purpose:
-        related = {"VIEW_FILES": {"UPLOAD_FILE", "VIEW_FILES"}, "UPLOAD_FILE": {"UPLOAD_FILE"}, "MANAGE_MEMBERS": {"MANAGE_MEMBERS"}}
-        if current not in related.get(purpose, {purpose}):
-            raise HTTPException(403, f"A fresh email OTP is required for {action}.")
+    if purpose and u.get("elevated_purpose") != purpose:
+        raise HTTPException(403, f"A fresh email OTP is required for {action}.")
 
 
 @app.get("/health")
@@ -1228,120 +1218,44 @@ def membership(user_id, case_id):
     return row
 
 
-def _verify_version_integrity(version_id: str):
-    """Server-side integrity verification used automatically by the UI and secure-view endpoint."""
-    vr = (supabase.table("document_versions")
-          .select("version_id,document_id,storage_path,file_hash,signature,uploader_id,version_number,previous_version_hash,signing_key_id")
-          .eq("version_id", version_id).limit(1).execute())
-    if not vr.data:
-        return {"valid": False, "status": "ambiguous", "message": "Document version record is missing."}
-    v = vr.data[0]
-
-    try:
-        stored = supabase.storage.from_(DOCUMENT_BUCKET).download(v["storage_path"])
-        actual_hash = hashlib.sha256(stored).hexdigest()
-        hash_valid = secrets.compare_digest(actual_hash, v.get("file_hash") or "")
-    except Exception as exc:
-        return {"valid": False, "status": "ambiguous", "message": f"Stored file could not be checked: {error_text(exc)}"}
-
-    signature_valid = None
-    if v.get("signing_key_id"):
-        kr = (supabase.table("user_keys").select("public_key,algorithm")
-              .eq("key_id", v["signing_key_id"]).limit(1).execute())
-        if kr.data and kr.data[0].get("public_key"):
-            try:
-                signature_valid = bool(verify_signature(kr.data[0]["public_key"], v["file_hash"], v["signature"]))
-            except Exception:
-                signature_valid = False
-        else:
-            signature_valid = False
-    elif v.get("uploader_id"):
-        # Legacy records: try the uploader's active/known public keys.
-        kr = (supabase.table("user_keys").select("public_key,algorithm")
-              .eq("user_id", v["uploader_id"]).order("created_at", desc=True).execute())
-        for row in (kr.data or []):
-            if row.get("public_key"):
-                try:
-                    if verify_signature(row["public_key"], v["file_hash"], v["signature"]):
-                        signature_valid = True
-                        break
-                except Exception:
-                    pass
-        if signature_valid is None:
-            signature_valid = False
-
-    version_number = int(v.get("version_number") or 1)
-    chain_valid = True
-    if version_number > 1:
-        prev = (supabase.table("document_versions").select("file_hash")
-                .eq("document_id", v["document_id"]).eq("version_number", version_number - 1)
-                .limit(1).execute())
-        chain_valid = bool(prev.data and secrets.compare_digest(v.get("previous_version_hash") or "", prev.data[0].get("file_hash") or ""))
-
-    # External hash-only submissions have no signing key by design.
-    hash_only_external = (v.get("signature") == "EXTERNAL_HASH_ONLY" and not v.get("uploader_id"))
-    valid = bool(hash_valid and chain_valid and (signature_valid is True or hash_only_external))
-    if valid:
-        message = "Integrity verified automatically."
-        status = "verified"
-    elif not hash_valid:
-        message = "The stored file hash does not match the recorded hash. Viewing is blocked."
-        status = "failed"
-    elif not chain_valid:
-        message = "The document version chain is inconsistent. Viewing is blocked."
-        status = "failed"
-    else:
-        message = "The digital signature could not be verified. Viewing is blocked."
-        status = "ambiguous"
-    return {
-        "valid": valid, "status": status, "message": message,
-        "hash_valid": hash_valid, "signature_valid": signature_valid,
-        "chain_valid": chain_valid, "version_number": version_number,
-    }
-
-
 @app.get("/case/documents")
-def case_documents(case_id: str, authorization: str | None = Header(default=None)):
+def case_documents(
+    case_id: str,
+    authorization: str | None = Header(default=None),
+):
     u = get_current_user(authorization)
     require_elevated(u, "viewing case files", "VIEW_FILES")
     m = membership(u["user_id"], case_id)
     allowed = set(m.get("allowed_document_types") or [])
     try:
-        r = (supabase.table("documents")
-             .select("document_id,case_id,document_type,file_type,uploader_id,current_version_id")
-             .eq("case_id", case_id).order("document_type", desc=False).execute())
+        r = (
+            supabase.table("documents")
+            .select("document_id,case_id,document_type,file_type,uploader_id,current_version_id")
+            .eq("case_id", case_id).order("document_type", desc=False).execute()
+        )
         visible = []
         for d in r.data or []:
             if d["document_type"] not in allowed:
                 continue
-            vr = (supabase.table("document_versions")
-                  .select("version_id,version_number,timestamp")
-                  .eq("document_id", d["document_id"]).order("version_number", desc=True).limit(1).execute())
+            vr = (
+                supabase.table("document_versions")
+                .select("version_id,version_number,storage_path,file_hash,signature,timestamp,previous_version_hash,signing_key_id")
+                .eq("document_id", d["document_id"])
+                .order("version_number", desc=True).limit(1).execute()
+            )
             v = vr.data[0] if vr.data else {}
-            integrity = _verify_version_integrity(v["version_id"]) if v.get("version_id") else {"valid": False, "status": "ambiguous", "message": "No document version is available."}
-            ocr = None
-            if v.get("version_id"):
-                try:
-                    oq = (supabase.table("document_ocr").select("ocr_version,status,extracted_text,confidence,engine,error,completed_at")
-                          .eq("version_id", v["version_id"]).order("ocr_version", desc=True).limit(1).execute())
-                    if oq.data:
-                        ocr = oq.data[0]
-                except Exception:
-                    ocr = None
             visible.append({
-                "document_id": d["document_id"],
-                "document_type": d["document_type"],
-                "current_version_id": d["current_version_id"],
+                "document_id": d["document_id"], "case_id": d["case_id"],
+                "document_type": d["document_type"], "file_type": d["file_type"],
+                "uploader_id": d["uploader_id"], "current_version_id": d["current_version_id"],
+                "filename": Path(v.get("storage_path", "")).name or "Unnamed file",
                 "version": {
-                    "version_id": v.get("version_id"),
-                    "version_number": v.get("version_number"),
+                    "version_id": v.get("version_id"), "version_number": v.get("version_number"),
+                    "file_hash": v.get("file_hash"), "signature": v.get("signature"),
                     "timestamp": v.get("timestamp"),
                 },
-                "integrity": integrity,
-                "ocr": ocr,
             })
-        warnings = sum(1 for x in visible if not x["integrity"].get("valid"))
-        return {"my_permission_level": m["permission_level"], "documents": visible, "integrity_warning_count": warnings}
+        return {"my_permission_level": m["permission_level"], "my_allowed_document_types": sorted(allowed), "documents": visible}
     except Exception as exc:
         raise HTTPException(500, f"Could not load case files: {error_text(exc)}")
 
@@ -1364,33 +1278,46 @@ def document_versions(document_id: str, authorization: str | None = Header(defau
 
 
 @app.get("/documents/file/{version_id}")
-def document_file(version_id: str, authorization: str | None = Header(default=None)):
+def document_file(
+    version_id: str,
+    authorization: str | None = Header(default=None),
+):
     u = get_current_user(authorization)
     require_elevated(u, "opening case files", "VIEW_FILES")
     try:
-        vr = (supabase.table("document_versions").select("version_id,document_id,storage_path")
-              .eq("version_id", version_id).limit(1).execute())
+        vr = (
+            supabase.table("document_versions")
+            .select("version_id,document_id,storage_path")
+            .eq("version_id", version_id).limit(1).execute()
+        )
         if not vr.data:
             raise HTTPException(404, "Document version not found.")
+
         v = vr.data[0]
-        dr = (supabase.table("documents").select("document_id,case_id,document_type")
-              .eq("document_id", v["document_id"]).limit(1).execute())
+        dr = (
+            supabase.table("documents")
+            .select("document_id,case_id,document_type")
+            .eq("document_id", v["document_id"]).limit(1).execute()
+        )
         if not dr.data:
             raise HTTPException(404, "Document not found.")
+
         d = dr.data[0]
         m = membership(u["user_id"], d["case_id"])
         if d["document_type"] not in set(m.get("allowed_document_types") or []):
             raise HTTPException(403, "You are not authorized to view this document.")
 
-        integrity = _verify_version_integrity(version_id)
-        if not integrity.get("valid"):
-            raise HTTPException(409, integrity.get("message") or "Document integrity could not be verified. Viewing is blocked.")
-
-        signed = supabase.storage.from_(DOCUMENT_BUCKET).create_signed_url(v["storage_path"], 120)
-        url = signed.get("signedURL") or signed.get("signedUrl") or signed.get("signed_url")
+        signed = supabase.storage.from_(DOCUMENT_BUCKET).create_signed_url(
+            v["storage_path"], 120
+        )
+        url = (
+            signed.get("signedURL")
+            or signed.get("signedUrl")
+            or signed.get("signed_url")
+        )
         if not url:
             raise RuntimeError(f"Supabase did not return a signed URL: {signed}")
-        return {"url": url, "expires_in": 120, "integrity": integrity}
+        return {"url": url, "expires_in": 120}
     except HTTPException:
         raise
     except Exception as exc:
@@ -1501,7 +1428,6 @@ def check_upload_permission(user_id, case_id, document_type):
 
 @app.post("/documents/upload")
 async def upload_document(
-    background_tasks: BackgroundTasks,
     case_id: str = Form(...),
     document_type: str = Form(...),
     file: UploadFile = File(...),
@@ -1562,8 +1488,6 @@ async def upload_document(
         if not vr.data:
             raise RuntimeError("document_versions insert returned no row.")
         supabase.table("documents").update({"current_version_id": vid, "file_type": ft, "uploader_id": u["user_id"]}).eq("document_id", did).execute()
-        _create_ocr_pending(vid)
-        background_tasks.add_task(_process_ocr_for_version, vid)
         notify(u["user_id"], "File uploaded", f"{name} uploaded as version {version_number}.", "document_uploaded", case_id=case_id)
         return {"success": True, "message": f"File uploaded as Version {version_number}.", "document_id": did, "version_id": vid, "version_number": version_number, "file_hash": h, "signature": signed["signature"], "storage_path": path}
     except HTTPException:
@@ -1678,185 +1602,127 @@ def case_invite(req: CaseInviteRequest, authorization: str | None = Header(defau
     return {"success": True, "message": f"{req.employee_id} added to the case."}
 
 
-# --------------------------- OCR ---------------------------
+# --------------------------- SELF-HOSTED OCR ---------------------------
+#
+# OCR is intentionally kept separate from the document's immutable bytes.
+# The original file is never modified by OCR.
+#
+from ocr_engine import run_ocr as _self_hosted_run_ocr
 
-def _get_ocr_engine():
-    global _OCR_ENGINE, _OCR_ENGINE_ERROR
-    if _OCR_ENGINE is not None:
-        return _OCR_ENGINE
-    if _OCR_ENGINE_ERROR:
-        raise RuntimeError(_OCR_ENGINE_ERROR)
+
+def _run_ocr(data: bytes, filename: str, language: str = "eng") -> dict:
+    """
+    Self-hosted OCR using PaddleOCR PP-OCRv5.
+
+    PP-OCRv5 supports general OCR and challenging handwriting scenarios.
+    The language argument is retained for frontend compatibility; the
+    deployed model is selected through OCR_LANG.
+    """
     try:
-        from paddleocr import PaddleOCR
-        _OCR_ENGINE = PaddleOCR(
-            ocr_version=OCR_VERSION,
-            lang=OCR_LANG,
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
-            use_textline_orientation=False,
-            device=OCR_DEVICE,
-            enable_mkldnn=(OCR_DEVICE == "cpu"),
-            cpu_threads=OCR_CPU_THREADS,
-        )
-        return _OCR_ENGINE
+        return _self_hosted_run_ocr(data, filename)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
-        _OCR_ENGINE_ERROR = f"PaddleOCR initialization failed: {error_text(exc)}"
-        raise RuntimeError(_OCR_ENGINE_ERROR) from exc
-
-
-def _paddle_result_data(result):
-    if isinstance(result, dict):
-        return result
-    for attr in ("json", "to_dict"):
-        try:
-            value = getattr(result, attr)
-            value = value() if callable(value) else value
-            if isinstance(value, dict):
-                return value
-        except Exception:
-            pass
-    return result
-
-
-def _ocr_image_bytes(data: bytes):
-    from PIL import Image
-    import io
-    image = Image.open(io.BytesIO(data)).convert("RGB")
-    result = _get_ocr_engine().predict(image)
-    lines, scores = [], []
-    for item in result:
-        obj = _paddle_result_data(item)
-        texts = obj.get("rec_texts") if isinstance(obj, dict) else getattr(obj, "rec_texts", None)
-        confs = obj.get("rec_scores") if isinstance(obj, dict) else getattr(obj, "rec_scores", None)
-        texts = list(texts or [])
-        confs = list(confs or [])
-        for i, text in enumerate(texts):
-            text = str(text).strip()
-            if text:
-                lines.append(text)
-                try:
-                    scores.append(float(confs[i]))
-                except Exception:
-                    pass
-    confidence = (sum(scores) / len(scores)) if scores else 0.0
-    return "\n".join(lines).strip(), confidence, scores
-
-
-def _ocr_pdf_bytes(data: bytes):
-    import fitz
-    doc = fitz.open(stream=data, filetype="pdf")
-    parts, scores = [], []
-    try:
-        for page_no, page in enumerate(doc, start=1):
-            native = page.get_text("text").strip()
-            if native:
-                parts.append(native)
-                scores.append(1.0)
-                continue
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-            text, confidence, line_scores = _ocr_image_bytes(pix.tobytes("png"))
-            if text:
-                parts.append(text)
-            if line_scores:
-                scores.extend(line_scores)
-            elif text:
-                scores.append(confidence)
-    finally:
-        doc.close()
-    confidence = (sum(scores) / len(scores)) if scores else 0.0
-    return "\n\n".join(parts).strip(), confidence, scores
-
-
-def _run_ocr(data: bytes, filename: str):
-    ext = Path(filename or "").suffix.lower()
-    if ext == ".pdf":
-        return _ocr_pdf_bytes(data)
-    if ext in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}:
-        return _ocr_image_bytes(data)
-    if ext == ".txt":
-        text = data.decode("utf-8", errors="replace").strip()
-        return text, 1.0 if text else 0.0, [1.0] if text else []
-    if ext in {".docx", ".doc"}:
-        raise RuntimeError("Office document OCR is not enabled. Convert the document to PDF/image for OCR.")
-    if ext in {".pptx", ".ppt"}:
-        raise RuntimeError("PowerPoint OCR is not enabled. Convert the presentation to PDF/image for OCR.")
-    raise RuntimeError("Unsupported file type for OCR.")
-
-
-def _create_ocr_pending(version_id: str):
-    try:
-        existing = (supabase.table("document_ocr").select("id").eq("version_id", version_id).limit(1).execute())
-        if existing.data:
-            supabase.table("document_ocr").update({"status": "pending", "error": None, "completed_at": None}).eq("id", existing.data[0]["id"]).execute()
-        else:
-            supabase.table("document_ocr").insert({"version_id": version_id, "ocr_version": 1, "status": "pending", "engine": f"PaddleOCR {OCR_VERSION}"}).execute()
-    except Exception:
-        # OCR table migration may not have been run yet; upload itself must remain valid.
-        pass
-
-
-def _process_ocr_for_version(version_id: str):
-    try:
-        vr = (supabase.table("document_versions").select("version_id,storage_path")
-              .eq("version_id", version_id).limit(1).execute())
-        if not vr.data:
-            return
-        data = supabase.storage.from_(DOCUMENT_BUCKET).download(vr.data[0]["storage_path"])
-        filename = Path(vr.data[0]["storage_path"]).name
-        text, confidence, line_scores = _run_ocr(data, filename)
-        payload = {
-            "status": "completed", "extracted_text": text,
-            "confidence": round(float(confidence), 6),
-            "engine": f"PaddleOCR {OCR_VERSION}",
-            "line_confidences": line_scores, "error": None,
-            "completed_at": iso(now()),
-        }
-        q = supabase.table("document_ocr").update(payload).eq("version_id", version_id).execute()
-        if not q.data:
-            supabase.table("document_ocr").insert({"version_id": version_id, "ocr_version": 1, **payload}).execute()
-    except Exception as exc:
-        try:
-            supabase.table("document_ocr").update({
-                "status": "failed", "error": error_text(exc), "completed_at": iso(now()),
-                "engine": f"PaddleOCR {OCR_VERSION}",
-            }).eq("version_id", version_id).execute()
-        except Exception:
-            pass
+        raise HTTPException(500, f"Self-hosted OCR failed: {error_text(exc)}") from exc
 
 
 @app.get("/ocr/health")
-def ocr_health(authorization: str | None = Header(default=None)):
-    get_current_user(authorization)
+def ocr_health():
+    """Lightweight status endpoint; model is loaded only when OCR is used."""
     try:
-        _get_ocr_engine()
-        return {"ok": True, "engine": f"PaddleOCR {OCR_VERSION}", "device": OCR_DEVICE, "handwriting_supported": True}
-    except Exception as exc:
-        return {"ok": False, "engine": f"PaddleOCR {OCR_VERSION}", "error": error_text(exc)}
+        from ocr_engine import _OCR
+        return {
+            "available": _OCR is not None,
+            "engine": "PaddleOCR PP-OCRv5 (self-hosted)",
+            "handwriting_supported": True,
+        }
+    except Exception:
+        return {
+            "available": False,
+            "engine": "PaddleOCR PP-OCRv5 (self-hosted)",
+            "handwriting_supported": True,
+        }
 
 
-@app.get("/documents/ocr-status/{version_id}")
-def ocr_status(version_id: str, authorization: str | None = Header(default=None)):
+@app.post("/ocr/extract")
+async def ocr_extract(
+    file: UploadFile = File(...),
+    language: str = Form("eng"),
+    authorization: str | None = Header(default=None),
+):
     u = get_current_user(authorization)
-    require_elevated(u, "viewing extracted document text", "VIEW_FILES")
-    vr = supabase.table("document_versions").select("version_id,document_id").eq("version_id", version_id).limit(1).execute()
-    if not vr.data:
-        raise HTTPException(404, "Document version not found.")
-    dr = supabase.table("documents").select("case_id,document_type").eq("document_id", vr.data[0]["document_id"]).limit(1).execute()
-    if not dr.data:
-        raise HTTPException(404, "Document not found.")
-    d = dr.data[0]
-    m = membership(u["user_id"], d["case_id"])
-    if d["document_type"] not in set(m.get("allowed_document_types") or []):
-        raise HTTPException(403, "You are not authorized to view this document.")
-    q = (supabase.table("document_ocr").select("ocr_version,status,extracted_text,confidence,engine,error,completed_at")
-         .eq("version_id", version_id).order("ocr_version", desc=True).limit(1).execute())
-    return q.data[0] if q.data else {"ocr_version": 1, "status": "pending", "extracted_text": None, "confidence": None}
+    require_elevated(u, "OCR processing", "VIEW_FILES")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "The uploaded file is empty.")
+    if len(data) > MAX_FILE_SIZE:
+        raise HTTPException(413, "File is too large for OCR.")
+
+    result = _run_ocr(data, file.filename or "document", language)
+    return {
+        "filename": file.filename,
+        "language": language,
+        **result,
+        "characters": len(result["text"]),
+    }
 
 
-# Legacy endpoint retained only to return the stored OCR result; it never starts OCR on view.
 @app.post("/documents/ocr/{version_id}")
-def ocr_stored_document(version_id: str, authorization: str | None = Header(default=None)):
-    return ocr_status(version_id, authorization)
+def ocr_stored_document(
+    version_id: str,
+    language: str = Form("eng"),
+    authorization: str | None = Header(default=None),
+):
+    u = get_current_user(authorization)
+    require_elevated(u, "OCR processing", "VIEW_FILES")
+
+    try:
+        vr = (
+            supabase.table("document_versions")
+            .select("version_id,document_id,storage_path")
+            .eq("version_id", version_id)
+            .limit(1)
+            .execute()
+        )
+        if not vr.data:
+            raise HTTPException(404, "Document version not found.")
+
+        v = vr.data[0]
+        dr = (
+            supabase.table("documents")
+            .select("document_id,case_id,document_type")
+            .eq("document_id", v["document_id"])
+            .limit(1)
+            .execute()
+        )
+        if not dr.data:
+            raise HTTPException(404, "Document not found.")
+
+        d = dr.data[0]
+        m = membership(u["user_id"], d["case_id"])
+        if d["document_type"] not in set(m.get("allowed_document_types") or []):
+            raise HTTPException(403, "You are not authorized to OCR this document.")
+
+        data = supabase.storage.from_(DOCUMENT_BUCKET).download(v["storage_path"])
+        result = _run_ocr(data, Path(v["storage_path"]).name, language)
+
+        return {
+            "version_id": version_id,
+            "document_type": d["document_type"],
+            "language": language,
+            **result,
+            "characters": len(result["text"]),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            500, f"Could not OCR stored document: {error_text(exc)}"
+        )
 
 
 class ExternalCaseInviteRequest(BaseModel):
@@ -1923,7 +1789,7 @@ def external_accept(req: ExternalTokenRequest):
     return {"success":True,"participant_id":x["participant_id"],"token":req.token}
 
 @app.post("/external/documents/upload")
-async def external_upload(background_tasks: BackgroundTasks, token: str = Form(...), file: UploadFile = File(...), document_type: str = Form(...)):
+async def external_upload(token: str = Form(...), file: UploadFile = File(...), document_type: str = Form(...)):
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     pr = supabase.table("external_case_participants").select("participant_id,case_id,allowed_document_types,permission_level,status,expires_at").eq("invitation_token_hash", token_hash).limit(1).execute()
     if not pr.data: raise HTTPException(401,"Invalid external access token.")
@@ -1955,9 +1821,7 @@ async def external_upload(background_tasks: BackgroundTasks, token: str = Form(.
     supabase.storage.from_(DOCUMENT_BUCKET).upload(path,data,{"content-type":ctype,"upsert":False})
     supabase.table("document_versions").insert({"version_id":vid,"document_id":did,"storage_path":path,"file_hash":h,"previous_version_hash":prev,"version_number":vn,"signing_key_id":None,"signature":"EXTERNAL_HASH_ONLY","co_signature":None,"uploader_id":None,"timestamp":iso(now())}).execute()
     supabase.table("documents").update({"current_version_id":vid}).eq("document_id",did).execute()
-    _create_ocr_pending(vid)
-    background_tasks.add_task(_process_ocr_for_version, vid)
-    return {"success":True,"message":f"Uploaded as Version {vn}; text extraction started automatically.","version_number":vn,"document_id":did,"version_id":vid,"file_hash":h}
+    return {"success":True,"message":f"Uploaded as Version {vn}.","version_number":vn,"document_id":did,"version_id":vid,"file_hash":h}
 
 if __name__ == "__main__":
     import uvicorn

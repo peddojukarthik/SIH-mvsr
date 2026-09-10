@@ -171,9 +171,16 @@ def pdf_bytes_to_ocr(data: bytes) -> dict:
     confidences = []
 
     for page_no, page in enumerate(doc, start=1):
-        # 2x rendering gives the OCR detector more pixels without changing
-        # the stored source document.
-        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+        # Digital PDFs already contain searchable text. Avoid running the
+        # expensive OCR model on those pages.
+        native = page.get_text("text").strip()
+        if native:
+            pages.append(f"--- Page {page_no} ---\n{native}")
+            continue
+
+        # Only scanned/image pages reach PaddleOCR. 1.5x is a good CPU
+        # compromise; the original PDF bytes are never modified.
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
         result = _predict_image(_image(pix.tobytes("png")))
         page_text = result["text"]
 
@@ -204,6 +211,50 @@ def pdf_bytes_to_ocr(data: bytes) -> dict:
 def run_ocr(data: bytes, filename: str) -> dict:
     ext = Path(filename or "").suffix.lower()
 
+    if ext == ".txt":
+        text = data.decode("utf-8", errors="replace").strip()
+        return {
+            "text": text, "lines": [], "confidence": 1.0,
+            "engine": "Native UTF-8 text extraction",
+            "handwriting_supported": False,
+        }
+
+    if ext == ".docx":
+        try:
+            from docx import Document
+            import io as _io
+            doc = Document(_io.BytesIO(data))
+            text = "\n".join(p.text for p in doc.paragraphs if p.text.strip()).strip()
+            return {
+                "text": text, "lines": [], "confidence": 1.0 if text else None,
+                "engine": "Native DOCX text extraction",
+                "handwriting_supported": False,
+            }
+        except Exception as exc:
+            raise RuntimeError(f"DOCX text extraction failed: {exc}") from exc
+
+    if ext == ".pptx":
+        try:
+            from pptx import Presentation
+            import io as _io
+            prs = Presentation(_io.BytesIO(data))
+            chunks = []
+            for slide_no, slide in enumerate(prs.slides, start=1):
+                texts = []
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text.strip():
+                        texts.append(shape.text.strip())
+                if texts:
+                    chunks.append(f"--- Slide {slide_no} ---\n" + "\n".join(texts))
+            text = "\n\n".join(chunks).strip()
+            return {
+                "text": text, "lines": [], "confidence": 1.0 if text else None,
+                "engine": "Native PPTX text extraction",
+                "handwriting_supported": False,
+            }
+        except Exception as exc:
+            raise RuntimeError(f"PPTX text extraction failed: {exc}") from exc
+
     if ext == ".pdf":
         return pdf_bytes_to_ocr(data)
 
@@ -211,7 +262,7 @@ def run_ocr(data: bytes, filename: str) -> dict:
         return image_bytes_to_ocr(data)
 
     raise ValueError(
-        "OCR supports PDF, PNG, JPG, JPEG, WEBP, BMP, TIF and TIFF files."
+        "Text extraction supports PDF, PNG, JPG, JPEG, WEBP, BMP, TIF, TIFF, TXT, DOCX and PPTX files."
     )
 
 

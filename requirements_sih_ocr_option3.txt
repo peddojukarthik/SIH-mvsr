@@ -16,3 +16,5 @@ numpy
 pymupdf
 paddlepaddle==3.2.0
 paddleocr==3.5.0
+python-docx
+python-pptx
