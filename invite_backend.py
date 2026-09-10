@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 import pyotp
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
@@ -71,6 +71,13 @@ ELEVATION_LIFETIME_MINUTES = 15
 EMAIL_OTP_MINUTES = 5
 DOCUMENT_BUCKET = os.getenv("DOCUMENT_BUCKET", "documents")
 MAX_FILE_SIZE = 50 * 1024 * 1024
+
+# --------------------------- CASE AI ---------------------------
+AI_OLLAMA_URL = os.getenv("OLLAMA_URL", "https://ollama.com")
+AI_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
+AI_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+AI_CHUNK_SIZE = int(os.getenv("AI_CHUNK_SIZE", "3500"))
+AI_TOP_K = int(os.getenv("AI_TOP_K", "10"))
 
 ALLOWED_EXTENSIONS = {
     ".pdf", ".png", ".jpg", ".jpeg", ".doc", ".docx",
@@ -204,7 +211,10 @@ def require_elevated(u, action, purpose=None):
     if not u.get("is_elevated"):
         raise HTTPException(403, f"Email OTP verification is required for {action}.")
     if purpose and u.get("elevated_purpose") != purpose:
-        raise HTTPException(403, f"A fresh email OTP is required for {action}.")
+        # Upload verification also authorizes the immediate file-list refresh
+        # after a successful upload; all other purposes remain exact.
+        if not (purpose == "VIEW_FILES" and u.get("elevated_purpose") == "UPLOAD_FILE"):
+            raise HTTPException(403, f"A fresh email OTP is required for {action}.")
 
 
 @app.get("/health")
@@ -939,6 +949,9 @@ def create_case(
             "fir_id": fir_id,
             "status": "open",
             "created_by": current_user["user_id"],
+            "ai_enabled": False,
+            "ai_enabled_by": None,
+            "ai_enabled_at": None,
         })
         .execute()
     )
@@ -950,6 +963,25 @@ def create_case(
         )
 
     case_id = case_result.data[0]["case_id"]
+
+    # The department head is a default member of every case. In the
+    # current SIH schema, department_admins with can_delegate are the
+    # head/management users. If no such user exists, the FIR filer is
+    # the safe fallback head so the case never becomes ownerless.
+    head_user_id = current_user["user_id"]
+    try:
+        hr = (supabase.table("department_admins")
+              .select("user_id")
+              .eq("department_id", current_user["department_id"])
+              .eq("can_delegate", True).limit(1).execute())
+        if hr.data and hr.data[0].get("user_id"):
+            head_user_id = hr.data[0]["user_id"]
+    except Exception:
+        pass
+    try:
+        supabase.table("cases").update({"head_user_id": head_user_id}).eq("case_id", case_id).execute()
+    except Exception:
+        pass
 
     # ------------------------------------------------------------
     # Give the FIR creator full case-management permission.
@@ -984,6 +1016,22 @@ def create_case(
             status_code=500,
             detail="Could not create case membership."
         )
+
+    if head_user_id != current_user["user_id"]:
+        try:
+            supabase.table("case_membership").insert({
+                "user_id": head_user_id,
+                "case_id": case_id,
+                "permission_level": "grant",
+                "granted_by": current_user["user_id"],
+                "allowed_document_types": [
+                    "fir", "evidence", "witness_statement", "suspect_interview",
+                    "forensic_report", "postmortem_report", "medical_report",
+                    "charge_sheet", "court_order", "judgment", "cctv", "other",
+                ],
+            }).execute()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------
     # Create the ACTUAL official FIR PDF.
@@ -1218,46 +1266,79 @@ def membership(user_id, case_id):
     return row
 
 
+def _verify_version_integrity_internal(version_id: str) -> dict:
+    try:
+        vr = (supabase.table("document_versions")
+              .select("version_id,document_id,storage_path,file_hash,signature,uploader_id,version_number,previous_version_hash,signing_key_id")
+              .eq("version_id", version_id).limit(1).execute())
+        if not vr.data:
+            return {"valid": False, "hash_valid": False, "signature_valid": None, "chain_valid": False, "message": "Document version not found."}
+        v = vr.data[0]
+        stored = supabase.storage.from_(DOCUMENT_BUCKET).download(v["storage_path"])
+        actual_hash = hashlib.sha256(stored).hexdigest()
+        hash_valid = secrets.compare_digest(actual_hash, v["file_hash"])
+        signature_valid = None
+        if v.get("signature") == "EXTERNAL_HASH_ONLY":
+            signature_valid = None
+        elif v.get("signing_key_id"):
+            kr = supabase.table("user_keys").select("public_key,algorithm").eq("key_id", v["signing_key_id"]).limit(1).execute()
+            if kr.data:
+                signature_valid = verify_signature(kr.data[0]["public_key"], v["file_hash"], v["signature"])
+        elif v.get("uploader_id"):
+            kr = supabase.table("user_keys").select("public_key,algorithm").eq("user_id", v["uploader_id"]).eq("key_status", "active").limit(1).execute()
+            if kr.data:
+                signature_valid = verify_signature(kr.data[0]["public_key"], v["file_hash"], v["signature"])
+        chain_valid = True
+        if int(v.get("version_number") or 1) > 1:
+            prev = (supabase.table("document_versions").select("file_hash")
+                    .eq("document_id", v["document_id"])
+                    .eq("version_number", int(v.get("version_number") or 1)-1).limit(1).execute())
+            chain_valid = bool(prev.data and secrets.compare_digest(v.get("previous_version_hash") or "", prev.data[0]["file_hash"]))
+        valid = bool(hash_valid and chain_valid and signature_valid is not False)
+        msg = "Integrity verified." if valid else "Integrity could not be verified. Viewing is blocked."
+        return {"valid": valid, "hash_valid": hash_valid, "signature_valid": signature_valid, "chain_valid": chain_valid, "message": msg}
+    except Exception as exc:
+        return {"valid": False, "hash_valid": False, "signature_valid": None, "chain_valid": False, "message": f"Integrity check failed: {error_text(exc)}"}
+
+
 @app.get("/case/documents")
-def case_documents(
-    case_id: str,
-    authorization: str | None = Header(default=None),
-):
+def case_documents(case_id: str, authorization: str | None = Header(default=None)):
     u = get_current_user(authorization)
     require_elevated(u, "viewing case files", "VIEW_FILES")
     m = membership(u["user_id"], case_id)
     allowed = set(m.get("allowed_document_types") or [])
     try:
-        r = (
-            supabase.table("documents")
-            .select("document_id,case_id,document_type,file_type,uploader_id,current_version_id")
-            .eq("case_id", case_id).order("document_type", desc=False).execute()
-        )
-        visible = []
+        r = (supabase.table("documents")
+             .select("document_id,case_id,document_type,file_type,uploader_id,current_version_id")
+             .eq("case_id", case_id).order("document_type", desc=False).execute())
+        visible=[]; warnings=0
         for d in r.data or []:
             if d["document_type"] not in allowed:
                 continue
-            vr = (
-                supabase.table("document_versions")
+            vr=(supabase.table("document_versions")
                 .select("version_id,version_number,storage_path,file_hash,signature,timestamp,previous_version_hash,signing_key_id")
-                .eq("document_id", d["document_id"])
-                .order("version_number", desc=True).limit(1).execute()
-            )
-            v = vr.data[0] if vr.data else {}
+                .eq("document_id",d["document_id"]).order("version_number",desc=True).limit(1).execute())
+            v=vr.data[0] if vr.data else {}
+            integrity=_verify_version_integrity_internal(v["version_id"]) if v.get("version_id") else {"valid":False,"message":"No document version found."}
+            if not integrity.get("valid"): warnings+=1
+            ai={"status":"not_started","extracted_text":"","pages":[]}
+            if v.get("version_id"):
+                ar=(supabase.table("case_ai_documents")
+                    .select("status,provider,model,fallback_used,extracted_text,pages,confidence,error,completed_at")
+                    .eq("version_id",v["version_id"]).limit(1).execute())
+                if ar.data: ai=ar.data[0]
             visible.append({
-                "document_id": d["document_id"], "case_id": d["case_id"],
-                "document_type": d["document_type"], "file_type": d["file_type"],
-                "uploader_id": d["uploader_id"], "current_version_id": d["current_version_id"],
-                "filename": Path(v.get("storage_path", "")).name or "Unnamed file",
-                "version": {
-                    "version_id": v.get("version_id"), "version_number": v.get("version_number"),
-                    "file_hash": v.get("file_hash"), "signature": v.get("signature"),
-                    "timestamp": v.get("timestamp"),
-                },
+                "document_id":d["document_id"],"case_id":d["case_id"],"document_type":d["document_type"],"file_type":d["file_type"],
+                "uploader_id":d["uploader_id"],"current_version_id":d["current_version_id"],
+                "filename":"Document", "integrity":integrity, "ai":ai,
+                "version":{"version_id":v.get("version_id"),"version_number":v.get("version_number"),"timestamp":v.get("timestamp")}
             })
-        return {"my_permission_level": m["permission_level"], "my_allowed_document_types": sorted(allowed), "documents": visible}
+        c=supabase.table("cases").select("ai_enabled,head_user_id,created_by").eq("case_id",case_id).limit(1).execute()
+        ai_enabled=bool(c.data and c.data[0].get("ai_enabled"))
+        return {"my_permission_level":m["permission_level"],"my_allowed_document_types":sorted(allowed),"documents":visible,"integrity_warning_count":warnings,"ai_enabled":ai_enabled,"is_case_head":bool(c.data and u["user_id"]==(c.data[0].get("head_user_id") or c.data[0].get("created_by")))}
+    except HTTPException: raise
     except Exception as exc:
-        raise HTTPException(500, f"Could not load case files: {error_text(exc)}")
+        raise HTTPException(500,f"Could not load case files: {error_text(exc)}")
 
 
 @app.get("/documents/versions/{document_id}")
@@ -1278,50 +1359,22 @@ def document_versions(document_id: str, authorization: str | None = Header(defau
 
 
 @app.get("/documents/file/{version_id}")
-def document_file(
-    version_id: str,
-    authorization: str | None = Header(default=None),
-):
-    u = get_current_user(authorization)
-    require_elevated(u, "opening case files", "VIEW_FILES")
-    try:
-        vr = (
-            supabase.table("document_versions")
-            .select("version_id,document_id,storage_path")
-            .eq("version_id", version_id).limit(1).execute()
-        )
-        if not vr.data:
-            raise HTTPException(404, "Document version not found.")
-
-        v = vr.data[0]
-        dr = (
-            supabase.table("documents")
-            .select("document_id,case_id,document_type")
-            .eq("document_id", v["document_id"]).limit(1).execute()
-        )
-        if not dr.data:
-            raise HTTPException(404, "Document not found.")
-
-        d = dr.data[0]
-        m = membership(u["user_id"], d["case_id"])
-        if d["document_type"] not in set(m.get("allowed_document_types") or []):
-            raise HTTPException(403, "You are not authorized to view this document.")
-
-        signed = supabase.storage.from_(DOCUMENT_BUCKET).create_signed_url(
-            v["storage_path"], 120
-        )
-        url = (
-            signed.get("signedURL")
-            or signed.get("signedUrl")
-            or signed.get("signed_url")
-        )
-        if not url:
-            raise RuntimeError(f"Supabase did not return a signed URL: {signed}")
-        return {"url": url, "expires_in": 120}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(500, f"Could not create secure file URL: {error_text(exc)}")
+def document_file(version_id: str, authorization: str | None = Header(default=None)):
+    u=get_current_user(authorization); require_elevated(u,"opening case files","VIEW_FILES")
+    vr=supabase.table("document_versions").select("version_id,document_id,storage_path").eq("version_id",version_id).limit(1).execute()
+    if not vr.data: raise HTTPException(404,"Document version not found.")
+    v=vr.data[0]
+    dr=supabase.table("documents").select("document_id,case_id,document_type").eq("document_id",v["document_id"]).limit(1).execute()
+    if not dr.data: raise HTTPException(404,"Document not found.")
+    d=dr.data[0]; m=membership(u["user_id"],d["case_id"])
+    if d["document_type"] not in set(m.get("allowed_document_types") or []): raise HTTPException(403,"You are not authorized to view this document.")
+    integrity=_verify_version_integrity_internal(version_id)
+    if not integrity.get("valid"):
+        raise HTTPException(409, integrity.get("message") or "Document integrity verification failed.")
+    signed=supabase.storage.from_(DOCUMENT_BUCKET).create_signed_url(v["storage_path"],120)
+    url=signed.get("signedURL") or signed.get("signedUrl") or signed.get("signed_url")
+    if not url: raise HTTPException(500,"Could not create secure file URL.")
+    return {"url":url,"expires_in":120,"integrity":integrity}
 
 
 @app.get("/documents/verify/{version_id}")
@@ -1428,6 +1481,7 @@ def check_upload_permission(user_id, case_id, document_type):
 
 @app.post("/documents/upload")
 async def upload_document(
+    background_tasks: BackgroundTasks,
     case_id: str = Form(...),
     document_type: str = Form(...),
     file: UploadFile = File(...),
@@ -1489,7 +1543,11 @@ async def upload_document(
             raise RuntimeError("document_versions insert returned no row.")
         supabase.table("documents").update({"current_version_id": vid, "file_type": ft, "uploader_id": u["user_id"]}).eq("document_id", did).execute()
         notify(u["user_id"], "File uploaded", f"{name} uploaded as version {version_number}.", "document_uploaded", case_id=case_id)
-        return {"success": True, "message": f"File uploaded as Version {version_number}.", "document_id": did, "version_id": vid, "version_number": version_number, "file_hash": h, "signature": signed["signature"], "storage_path": path}
+        if _case_ai_enabled(case_id):
+            _queue_ai_job(vid)
+            if background_tasks is not None:
+                background_tasks.add_task(_process_ai_job, vid)
+        return {"success": True, "message": f"File uploaded as Version {version_number}.", "document_id": did, "version_id": vid, "version_number": version_number, "file_hash": h, "signature": signed["signature"], "storage_path": path, "ai_queued": _case_ai_enabled(case_id)}
     except HTTPException:
         raise
     except Exception as exc:
@@ -1602,127 +1660,228 @@ def case_invite(req: CaseInviteRequest, authorization: str | None = Header(defau
     return {"success": True, "message": f"{req.employee_id} added to the case."}
 
 
-# --------------------------- SELF-HOSTED OCR ---------------------------
-#
-# OCR is intentionally kept separate from the document's immutable bytes.
-# The original file is never modified by OCR.
-#
-from ocr_engine import run_ocr as _self_hosted_run_ocr
+# --------------------------- CASE AI ---------------------------
+# PaddleOCR is intentionally removed. AI extraction is cloud-based through
+# Ollama Cloud with Gemini as an automatic fallback. Native text extraction
+# is still used for digital PDFs/DOCX/PPTX/TXT because it is instant and
+# avoids spending AI quota when OCR is unnecessary.
+from ai_engine import extract_document, answer_question, chunk_pages
 
 
-def _run_ocr(data: bytes, filename: str, language: str = "eng") -> dict:
-    """
-    Self-hosted OCR using PaddleOCR PP-OCRv5.
+def _case_ai_enabled(case_id: str) -> bool:
+    r = supabase.table("cases").select("ai_enabled").eq("case_id", case_id).limit(1).execute()
+    return bool(r.data and r.data[0].get("ai_enabled"))
 
-    PP-OCRv5 supports general OCR and challenging handwriting scenarios.
-    The language argument is retained for frontend compatibility; the
-    deployed model is selected through OCR_LANG.
-    """
+
+def _queue_ai_job(version_id: str):
     try:
-        return _self_hosted_run_ocr(data, filename)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(500, f"Self-hosted OCR failed: {error_text(exc)}") from exc
-
-
-@app.get("/ocr/health")
-def ocr_health():
-    """Lightweight status endpoint; model is loaded only when OCR is used."""
-    try:
-        from ocr_engine import _OCR
-        return {
-            "available": _OCR is not None,
-            "engine": "PaddleOCR PP-OCRv5 (self-hosted)",
-            "handwriting_supported": True,
-        }
+        vr = (supabase.table("document_versions")
+              .select("version_id,document_id,storage_path")
+              .eq("version_id", version_id).limit(1).execute())
+        if not vr.data:
+            return
+        v = vr.data[0]
+        dr = (supabase.table("documents")
+              .select("document_id,case_id,document_type")
+              .eq("document_id", v["document_id"]).limit(1).execute())
+        if not dr.data:
+            return
+        d = dr.data[0]
+        if not _case_ai_enabled(d["case_id"]):
+            return
+        existing = (supabase.table("case_ai_documents")
+                    .select("ai_document_id,status")
+                    .eq("version_id", version_id).limit(1).execute())
+        if existing.data:
+            if existing.data[0].get("status") in {"completed", "processing"}:
+                return
+            supabase.table("case_ai_documents").update({"status":"pending","error":None}).eq("ai_document_id", existing.data[0]["ai_document_id"]).execute()
+        else:
+            supabase.table("case_ai_documents").insert({
+                "case_id": d["case_id"], "document_id": d["document_id"],
+                "version_id": version_id, "document_type": d["document_type"],
+                "status": "pending"
+            }).execute()
     except Exception:
-        return {
-            "available": False,
-            "engine": "PaddleOCR PP-OCRv5 (self-hosted)",
-            "handwriting_supported": True,
-        }
+        pass
 
 
-@app.post("/ocr/extract")
-async def ocr_extract(
-    file: UploadFile = File(...),
-    language: str = Form("eng"),
-    authorization: str | None = Header(default=None),
-):
+def _process_ai_job(version_id: str):
+    row = None
+    try:
+        r = (supabase.table("case_ai_documents")
+             .select("*").eq("version_id", version_id).limit(1).execute())
+        if not r.data:
+            return
+        row = r.data[0]
+        supabase.table("case_ai_documents").update({"status":"processing","error":None}).eq("ai_document_id", row["ai_document_id"]).execute()
+        vr = (supabase.table("document_versions")
+              .select("storage_path").eq("version_id", version_id).limit(1).execute())
+        if not vr.data:
+            raise RuntimeError("Document version not found.")
+        data = supabase.storage.from_(DOCUMENT_BUCKET).download(vr.data[0]["storage_path"])
+        filename = Path(vr.data[0]["storage_path"]).name
+        result = extract_document(data, filename)
+        pages = result.get("pages") or []
+        text = result.get("text") or ""
+        supabase.table("case_ai_documents").update({
+            "status": "completed",
+            "provider": result.get("provider"),
+            "model": result.get("model"),
+            "fallback_used": bool(result.get("fallback_used")),
+            "extracted_text": text,
+            "pages": pages,
+            "confidence": result.get("confidence"),
+            "completed_at": iso(now()),
+            "error": None,
+        }).eq("ai_document_id", row["ai_document_id"]).execute()
+        # Replace chunks only for this immutable version. Previous versions
+        # remain available for audit/history but are not used for current AI.
+        supabase.table("case_ai_chunks").delete().eq("version_id", version_id).execute()
+        chunks = chunk_pages(pages, AI_CHUNK_SIZE)
+        if chunks:
+            supabase.table("case_ai_chunks").insert([
+                {"case_id": row["case_id"], "document_id": row["document_id"],
+                 "version_id": version_id, "page_number": c["page"],
+                 "chunk_index": c["chunk_index"], "text": c["text"]}
+                for c in chunks
+            ]).execute()
+    except Exception as exc:
+        if row:
+            try:
+                supabase.table("case_ai_documents").update({
+                    "status":"failed", "error":error_text(exc), "completed_at":iso(now())
+                }).eq("ai_document_id", row["ai_document_id"]).execute()
+            except Exception:
+                pass
+
+
+def _is_case_head(user_id: str, case_id: str) -> bool:
+    r = supabase.table("cases").select("head_user_id,created_by").eq("case_id", case_id).limit(1).execute()
+    if not r.data:
+        raise HTTPException(404, "Case not found.")
+    return user_id == (r.data[0].get("head_user_id") or r.data[0].get("created_by"))
+
+
+class CaseAIToggleRequest(BaseModel):
+    case_id: str
+    enabled: bool
+
+
+class CaseAIChatRequest(BaseModel):
+    case_id: str
+    question: str
+
+
+@app.get("/case/ai/status")
+def case_ai_status(case_id: str, authorization: str | None = Header(default=None)):
     u = get_current_user(authorization)
-    require_elevated(u, "OCR processing", "VIEW_FILES")
-
-    data = await file.read()
-    if not data:
-        raise HTTPException(400, "The uploaded file is empty.")
-    if len(data) > MAX_FILE_SIZE:
-        raise HTTPException(413, "File is too large for OCR.")
-
-    result = _run_ocr(data, file.filename or "document", language)
+    membership(u["user_id"], case_id)
+    r = supabase.table("cases").select("ai_enabled,ai_enabled_by,ai_enabled_at,ai_provider,ai_model,head_user_id,created_by").eq("case_id", case_id).limit(1).execute()
+    if not r.data:
+        raise HTTPException(404, "Case not found.")
+    c = r.data[0]
+    pending = supabase.table("case_ai_documents").select("ai_document_id", count="exact").eq("case_id", case_id).in_("status", ["pending","processing"]).execute()
     return {
-        "filename": file.filename,
-        "language": language,
-        **result,
-        "characters": len(result["text"]),
+        "enabled": bool(c.get("ai_enabled")),
+        "is_head": _is_case_head(u["user_id"], case_id),
+        "provider": c.get("ai_provider") or "ollama",
+        "model": c.get("ai_model") or AI_OLLAMA_MODEL,
+        "pending_count": pending.count or 0,
     }
 
 
-@app.post("/documents/ocr/{version_id}")
-def ocr_stored_document(
-    version_id: str,
-    language: str = Form("eng"),
-    authorization: str | None = Header(default=None),
-):
+@app.post("/case/ai/toggle")
+def toggle_case_ai(req: CaseAIToggleRequest, background_tasks: BackgroundTasks, authorization: str | None = Header(default=None)):
     u = get_current_user(authorization)
-    require_elevated(u, "OCR processing", "VIEW_FILES")
+    membership(u["user_id"], req.case_id)
+    require_elevated(u, "changing Case AI settings", "MANAGE_MEMBERS")
+    if not _is_case_head(u["user_id"], req.case_id):
+        raise HTTPException(403, "Only the case Head can enable or disable Case AI.")
+    update = {
+        "ai_enabled": bool(req.enabled),
+        "ai_enabled_by": u["user_id"] if req.enabled else None,
+        "ai_enabled_at": iso(now()) if req.enabled else None,
+        "ai_provider": "ollama+gemini-fallback" if req.enabled else None,
+        "ai_model": AI_OLLAMA_MODEL if req.enabled else None,
+    }
+    supabase.table("cases").update(update).eq("case_id", req.case_id).execute()
+    if req.enabled:
+        docs = supabase.table("documents").select("document_id,current_version_id").eq("case_id", req.case_id).execute().data or []
+        for d in docs:
+            if d.get("current_version_id"):
+                _queue_ai_job(d["current_version_id"])
+                background_tasks.add_task(_process_ai_job, d["current_version_id"])
+    return {"success": True, "enabled": req.enabled, "message": "Case AI enabled." if req.enabled else "Case AI disabled."}
 
-    try:
-        vr = (
-            supabase.table("document_versions")
-            .select("version_id,document_id,storage_path")
-            .eq("version_id", version_id)
-            .limit(1)
-            .execute()
-        )
-        if not vr.data:
-            raise HTTPException(404, "Document version not found.")
 
-        v = vr.data[0]
-        dr = (
-            supabase.table("documents")
-            .select("document_id,case_id,document_type")
-            .eq("document_id", v["document_id"])
-            .limit(1)
-            .execute()
-        )
-        if not dr.data:
-            raise HTTPException(404, "Document not found.")
+@app.get("/documents/ai-status/{version_id}")
+def document_ai_status(version_id: str, authorization: str | None = Header(default=None)):
+    u = get_current_user(authorization)
+    vr = supabase.table("document_versions").select("document_id").eq("version_id", version_id).limit(1).execute()
+    if not vr.data:
+        raise HTTPException(404, "Document version not found.")
+    dr = supabase.table("documents").select("case_id,document_type").eq("document_id", vr.data[0]["document_id"]).limit(1).execute()
+    if not dr.data:
+        raise HTTPException(404, "Document not found.")
+    d = dr.data[0]
+    m = membership(u["user_id"], d["case_id"])
+    if d["document_type"] not in set(m.get("allowed_document_types") or []):
+        raise HTTPException(403, "You are not authorized to view this document.")
+    r = supabase.table("case_ai_documents").select("status,provider,model,fallback_used,extracted_text,pages,confidence,error,completed_at").eq("version_id", version_id).limit(1).execute()
+    return (r.data[0] if r.data else {"status":"not_started","extracted_text":"","pages":[]})
 
-        d = dr.data[0]
-        m = membership(u["user_id"], d["case_id"])
-        if d["document_type"] not in set(m.get("allowed_document_types") or []):
-            raise HTTPException(403, "You are not authorized to OCR this document.")
+# Backward-compatible route name so older frontend builds do not break.
+@app.get("/documents/ocr-status/{version_id}")
+def legacy_ocr_status(version_id: str, authorization: str | None = Header(default=None)):
+    return document_ai_status(version_id, authorization)
 
-        data = supabase.storage.from_(DOCUMENT_BUCKET).download(v["storage_path"])
-        result = _run_ocr(data, Path(v["storage_path"]).name, language)
 
-        return {
-            "version_id": version_id,
-            "document_type": d["document_type"],
-            "language": language,
-            **result,
-            "characters": len(result["text"]),
-        }
+def _retrieve_case_context(case_id: str, question: str):
+    docs = supabase.table("documents").select("document_id,current_version_id,document_type").eq("case_id", case_id).execute().data or []
+    version_ids = [d["current_version_id"] for d in docs if d.get("current_version_id")]
+    if not version_ids:
+        return []
+    rows = supabase.table("case_ai_chunks").select("document_id,version_id,page_number,chunk_index,text").eq("case_id", case_id).in_("version_id", version_ids).execute().data or []
+    qwords = {w.lower() for w in question.split() if len(w.strip(".,?!:;()[]{}\"'")) >= 3}
+    scored = []
+    for r in rows:
+        words = set(r.get("text","").lower().split())
+        score = sum(1 for w in qwords if w in words)
+        scored.append((score, r))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [r for _, r in scored[:AI_TOP_K]]
 
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(
-            500, f"Could not OCR stored document: {error_text(exc)}"
-        )
+
+@app.post("/case/ai/chat")
+def case_ai_chat(req: CaseAIChatRequest, authorization: str | None = Header(default=None)):
+    u = get_current_user(authorization)
+    membership(u["user_id"], req.case_id)
+    if not _case_ai_enabled(req.case_id):
+        raise HTTPException(403, "Case AI is disabled. The Head must enable it first.")
+    question = req.question.strip()
+    if not question:
+        raise HTTPException(400, "Question cannot be empty.")
+    context = _retrieve_case_context(req.case_id, question)
+    if not context:
+        answer = "I could not find any processed document content for this case yet."
+        sources = []
+    else:
+        prompt_parts = []
+        for i, c in enumerate(context, 1):
+            prompt_parts.append(f"[SOURCE {i} | page {c.get('page_number')}]\n{c.get('text','')}")
+        prompt = ("You are the read-only Case AI for a secure police document system. "
+                  "Answer ONLY from the supplied case sources. Do not invent facts. "
+                  "If the answer is not present, say that it is not found in the processed case documents. "
+                  "Do not provide legal, medical, or investigative conclusions beyond the source text. "
+                  "Cite sources as [SOURCE n, page X].\n\n"
+                  + "\n\n".join(prompt_parts) + f"\n\nQUESTION: {question}")
+        result = answer_question(prompt)
+        answer = result["text"]
+        sources = [{"page": c.get("page_number"), "document_id": c.get("document_id"), "version_id": c.get("version_id"), "chunk_index": c.get("chunk_index")} for c in context]
+    supabase.table("case_ai_messages").insert({"case_id": req.case_id, "user_id": u["user_id"], "role":"user", "content":question}).execute()
+    supabase.table("case_ai_messages").insert({"case_id": req.case_id, "user_id": u["user_id"], "role":"assistant", "content":answer, "sources":sources}).execute()
+    return {"answer":answer, "sources":sources}
 
 
 class ExternalCaseInviteRequest(BaseModel):
@@ -1789,7 +1948,7 @@ def external_accept(req: ExternalTokenRequest):
     return {"success":True,"participant_id":x["participant_id"],"token":req.token}
 
 @app.post("/external/documents/upload")
-async def external_upload(token: str = Form(...), file: UploadFile = File(...), document_type: str = Form(...)):
+async def external_upload(background_tasks: BackgroundTasks, token: str = Form(...), file: UploadFile = File(...), document_type: str = Form(...)):
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     pr = supabase.table("external_case_participants").select("participant_id,case_id,allowed_document_types,permission_level,status,expires_at").eq("invitation_token_hash", token_hash).limit(1).execute()
     if not pr.data: raise HTTPException(401,"Invalid external access token.")
@@ -1821,7 +1980,11 @@ async def external_upload(token: str = Form(...), file: UploadFile = File(...), 
     supabase.storage.from_(DOCUMENT_BUCKET).upload(path,data,{"content-type":ctype,"upsert":False})
     supabase.table("document_versions").insert({"version_id":vid,"document_id":did,"storage_path":path,"file_hash":h,"previous_version_hash":prev,"version_number":vn,"signing_key_id":None,"signature":"EXTERNAL_HASH_ONLY","co_signature":None,"uploader_id":None,"timestamp":iso(now())}).execute()
     supabase.table("documents").update({"current_version_id":vid}).eq("document_id",did).execute()
-    return {"success":True,"message":f"Uploaded as Version {vn}.","version_number":vn,"document_id":did,"version_id":vid,"file_hash":h}
+    if _case_ai_enabled(p["case_id"]):
+        _queue_ai_job(vid)
+        if background_tasks is not None:
+            background_tasks.add_task(_process_ai_job, vid)
+    return {"success":True,"message":f"Uploaded as Version {vn}.","version_number":vn,"document_id":did,"version_id":vid,"file_hash":h,"ai_queued":_case_ai_enabled(p["case_id"])}
 
 if __name__ == "__main__":
     import uvicorn

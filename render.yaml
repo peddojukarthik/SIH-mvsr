@@ -2,16 +2,20 @@ services:
   - type: web
     name: alliance
     env: python
-    buildCommand: pip install -r requirements_sih_ocr_option3.txt && python warmup_ocr.py
+    buildCommand: pip install -r requirements_sih_case_ai.txt
     startCommand: uvicorn invite_backend:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
-        value: "3.12.9"
-      - key: OCR_VERSION
-        value: PP-OCRv5
-      - key: OCR_LANG
-        value: en
-      - key: OCR_DEVICE
-        value: cpu
-      - key: OCR_CPU_THREADS
-        value: "4"
+        value: 3.12.9
+      - key: OLLAMA_MODEL
+        value: gemma3:12b
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: AI_REQUEST_TIMEOUT
+        value: "90"
+      - key: AI_PDF_DPI
+        value: "120"
+      - key: AI_CHUNK_SIZE
+        value: "3500"
+      - key: AI_TOP_K
+        value: "10"
