@@ -3,487 +3,87 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Case Details</title>
+<title>Secure DMS — Case</title>
 <style>
-body{font-family:system-ui;max-width:900px;margin:25px auto;padding:0 18px;background:#f8fafc;color:#172033}
-.card{background:#fff;border:1px solid #dbe2ea;border-radius:14px;padding:20px;margin:14px 0}
-.top{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.tabs{display:flex;gap:10px;flex-wrap:wrap}.tabs button{flex:1;min-width:150px}
-button{border:0;border-radius:8px;padding:10px 14px;background:#2563eb;color:#fff;cursor:pointer;margin:4px 0}
-.green{background:#047857}.gray{background:#475569}
-input,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #cbd5e1;border-radius:8px;margin:6px 0 10px}
-.file,.member,.result{padding:13px 0;border-bottom:1px solid #e5e7eb}.meta{color:#64748b;font-size:.85rem} .file-title{font-size:1.05rem;font-weight:700}.version-badge{display:inline-block;margin-left:8px;padding:3px 8px;border-radius:999px;background:#e2e8f0;color:#334155;font-size:.78rem;font-weight:600}.ocr-result{margin-top:10px;padding:12px;border-radius:8px;background:#f8fafc;border:1px solid #e2e8f0;white-space:pre-wrap;line-height:1.5;max-height:320px;overflow:auto}.ocr-result.loading{color:#64748b}.ocr-result.error{background:#fef2f2;color:#991b1b}.ocr-result.success{background:#ecfdf5;color:#065f46}.integrity{margin:10px 0;padding:10px 12px;border-radius:8px;font-weight:600}.integrity.ok{background:#ecfdf5;color:#065f46}.integrity.warn{background:#fff7ed;color:#9a3412}.integrity.bad{background:#fef2f2;color:#991b1b}.ocr-confidence{font-size:.85rem;color:#475569;margin-bottom:6px}.ocr-text{white-space:pre-wrap;line-height:1.55;background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:12px;max-height:360px;overflow:auto}.actions{display:flex;gap:8px;flex-wrap:wrap}
-.hash{font-family:monospace;font-size:.72rem;word-break:break-all;background:#f1f5f9;padding:8px;border-radius:6px}
-.modal{display:none;position:fixed;inset:0;background:#0008;align-items:center;justify-content:center}.box{background:#fff;padding:24px;border-radius:14px;width:min(520px,92vw)}
-.status{padding:10px;border-radius:8px;margin-top:8px;white-space:pre-wrap}.error{background:#fef2f2;color:#991b1b}.success{background:#ecfdf5;color:#065f46}
-.checks{display:grid;grid-template-columns:1fr 1fr;gap:7px}.check{padding:8px;background:#f8fafc;border-radius:7px}
-a{color:#2563eb}
+body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:1050px;margin:25px auto;padding:0 18px;background:#f8fafc;color:#172033}
+a{color:#2563eb}.card{background:#fff;border:1px solid #dbe2ea;border-radius:14px;padding:20px;margin:14px 0}.tabs{display:flex;gap:10px;flex-wrap:wrap}.tabs button{flex:1;min-width:180px}button{border:0;border-radius:8px;padding:10px 14px;background:#2563eb;color:#fff;cursor:pointer;margin:4px 0}button:disabled{opacity:.6;cursor:not-allowed}.green{background:#047857}.gray{background:#475569}.red{background:#b91c1c}input,select,textarea{width:100%;box-sizing:border-box;padding:10px;border:1px solid #cbd5e1;border-radius:8px;margin:6px 0 10px}textarea{min-height:180px;resize:vertical}.file,.member,.result{padding:16px 0;border-bottom:1px solid #e5e7eb}.meta{color:#64748b;font-size:.88rem}.status{padding:11px;border-radius:9px;margin-top:10px;white-space:pre-wrap}.error{background:#fef2f2;color:#991b1b}.success{background:#ecfdf5;color:#065f46}.warning{background:#fff7ed;color:#9a3412}.info{background:#f1f5f9;color:#475569}.checks{display:grid;grid-template-columns:1fr 1fr;gap:7px}.check{padding:8px;background:#f8fafc;border-radius:7px}.ocr-box{margin-top:12px;border:1px solid #dbe2ea;border-radius:10px;padding:14px;background:#fff}.ocr-text{white-space:pre-wrap;line-height:1.5;max-height:420px;overflow:auto;background:#f8fafc;padding:12px;border-radius:8px}.modal{display:none;position:fixed;inset:0;background:#0008;align-items:center;justify-content:center;z-index:20}.box{background:#fff;padding:24px;border-radius:14px;width:min(520px,92vw);max-height:90vh;overflow:auto}.viewer{width:min(1100px,94vw);height:min(90vh,850px);background:#fff;padding:18px;border-radius:14px;display:flex;flex-direction:column}.viewer-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;flex:1;min-height:0}.viewer-pane{border:1px solid #dbe2ea;border-radius:10px;padding:10px;min-height:0;overflow:auto}.viewer-frame{width:100%;height:100%;min-height:500px;border:0}.member-tag{display:inline-block;padding:4px 8px;border-radius:99px;background:#e0e7ff;margin:3px 4px 3px 0;font-size:.78rem}.hidden{display:none}@media(max-width:750px){.viewer-grid{grid-template-columns:1fr}.viewer-frame{min-height:350px}.checks{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 <a href="homepage.html">← Back to homepage</a>
-
 <div class="card">
-  <div class="top">
-    <div>
-      <h1 id="title">Case</h1>
-      
-    </div>
-  </div>
+  <h1>Case</h1>
   <div class="tabs">
     <button id="filesBtn">📁 Files</button>
     <button id="uploadBtn">⬆ Upload Photos / Files</button>
     <button id="membersBtn">👥 Members</button>
   </div>
 </div>
-
 <div id="panel"></div>
 
-<div id="otpModal" class="modal">
-  <div class="box">
-    <h2>Email verification</h2>
-    <p id="otpStatus">A 6-digit code will be sent to your official email.</p>
-    <input id="otpCode" maxlength="6" inputmode="numeric" placeholder="6-digit code">
-    <button id="verifyOtpBtn">Verify</button>
-    <button class="gray" id="cancelOtpBtn">Cancel</button>
+<div id="otpModal" class="modal"><div class="box">
+  <h2>Email verification</h2>
+  <p id="otpStatus">A 6-digit code will be sent to your official email.</p>
+  <input id="otpCode" maxlength="6" inputmode="numeric" placeholder="6-digit code">
+  <button id="verifyOtpBtn">Verify</button>
+  <button class="gray" id="cancelOtpBtn">Cancel</button>
+</div></div>
+
+<div id="viewerModal" class="modal"><div class="viewer">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><h2>Document View</h2><button class="gray" id="closeViewer">Close</button></div>
+  <div id="viewerStatus"></div>
+  <div class="viewer-grid">
+    <div class="viewer-pane"><h3>Original Document</h3><iframe id="viewerFrame" class="viewer-frame" title="Original document"></iframe></div>
+    <div class="viewer-pane"><h3>Extracted Text</h3><div id="viewerOcr"></div></div>
   </div>
-</div>
+</div></div>
 
 <script>
-const API = (location.hostname === "localhost" || location.hostname === "127.0.0.1")
-    ? "http://127.0.0.1:8000"
-    : "https://alliance-cqnf.onrender.com";
-const token = sessionStorage.getItem("token");
-const H = {"Authorization":"Bearer " + token};
+const API=(location.hostname==='localhost'||location.hostname==='127.0.0.1')?'http://127.0.0.1:8000':'https://alliance-cqnf.onrender.com';
+const token=sessionStorage.getItem('token');
+const H={'Authorization':'Bearer '+token};
+const caseId=new URLSearchParams(location.search).get('case_id');
+const panelEl=document.getElementById('panel');
+const otpModal=document.getElementById('otpModal');
+const otpCode=document.getElementById('otpCode');
+const otpStatus=document.getElementById('otpStatus');
+const viewerModal=document.getElementById('viewerModal');
+const viewerFrame=document.getElementById('viewerFrame');
+const viewerOcr=document.getElementById('viewerOcr');
+const viewerStatus=document.getElementById('viewerStatus');
+if(!token) location.href='login.html';
+if(!caseId) location.href='homepage.html';
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));}
+function errText(d){if(typeof d?.detail==='string')return d.detail;if(Array.isArray(d?.detail))return d.detail.map(x=>(Array.isArray(x.loc)?x.loc.join('.'):'field')+': '+(x.msg||JSON.stringify(x))).join('; ');return d?.message||JSON.stringify(d);}
+async function api(path,options={}){const response=await fetch(API+path,{...options,headers:{...(options.headers||{}),...H}});const raw=await response.text();let data={};try{data=raw?JSON.parse(raw):{};}catch{data={detail:raw}}if(!response.ok)throw new Error('HTTP '+response.status+': '+errText(data));return data;}
+let pendingPurpose=null,pendingAction=null;
+async function protectedAction(purpose,action){pendingPurpose=purpose;pendingAction=action;try{const d=await api('/security/request-otp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({purpose,case_id:caseId})});otpStatus.textContent=d.message||'Enter the code sent to your official email.';otpCode.value='';otpModal.style.display='flex';setTimeout(()=>otpCode.focus(),50);}catch(e){alert(e.message);}}
+async function verifyOtp(){try{await api('/security/verify-otp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({purpose:pendingPurpose,case_id:caseId,code:otpCode.value.trim()})});otpModal.style.display='none';if(pendingAction)await pendingAction();}catch(e){otpStatus.className='status error';otpStatus.textContent=e.message;}}
+document.getElementById('verifyOtpBtn').onclick=verifyOtp;document.getElementById('cancelOtpBtn').onclick=()=>otpModal.style.display='none';
+document.getElementById('filesBtn').onclick=()=>protectedAction('VIEW_FILES',showFiles);
+document.getElementById('uploadBtn').onclick=()=>protectedAction('UPLOAD_FILE',showUpload);
+document.getElementById('membersBtn').onclick=()=>protectedAction('MANAGE_MEMBERS',showMembers);
+document.getElementById('closeViewer').onclick=closeViewer;
+function closeViewer(){viewerModal.style.display='none';viewerFrame.src='about:blank';viewerOcr.innerHTML='';}
 
-const caseId = new URLSearchParams(window.location.search).get("case_id");
-const titleEl = document.getElementById("title");
-const panelEl = document.getElementById("panel");
-const otpModalEl = document.getElementById("otpModal");
-const otpCodeEl = document.getElementById("otpCode");
-const otpStatusEl = document.getElementById("otpStatus");
+async function showFiles(){try{const data=await api('/case/documents?case_id='+encodeURIComponent(caseId));const docs=data.documents||[];let html='<div class="card"><h2>Files for this case</h2>';if(data.integrity_warning_count>0)html+='<div class="status warning">⚠ Security warning: '+data.integrity_warning_count+' document(s) could not be automatically verified. Viewing is blocked for affected documents.</div>';if(!docs.length)html+='<p class="meta">No files visible to you.</p>';docs.forEach(x=>html+=fileHtml(x));html+='</div>';panelEl.innerHTML=html;startOcrPolling(docs);}catch(e){panelEl.innerHTML='<div class="status error">'+esc(e.message)+'</div>';}}
+function fileHtml(x){const v=x.version||{},i=x.integrity||{},o=x.ocr||{};let integrity=i.valid?'<div class="status success">✓ Integrity verified automatically</div>':'<div class="status warning">⚠ '+esc(i.message||'Integrity could not be verified. Viewing is blocked.')+'</div>';let ocr='';if(o.status==='completed')ocr='<div class="ocr-box"><b>Extracted Text · OCR Version '+esc(o.ocr_version||1)+'</b><div class="meta">Confidence: '+(o.confidence!=null?esc((Number(o.confidence)*100).toFixed(1))+'%':'Not available')+'</div><div class="ocr-text">'+esc(o.extracted_text||'No text detected.')+'</div></div>';else if(o.status==='failed')ocr='<div class="status warning">⚠ Text extraction failed. The original document is still securely stored.</div>';else ocr='<div class="status info" data-ocr-pending="'+esc(v.version_id||'')+'">Extracting text automatically…</div>';return '<div class="file"><b>Document</b><span class="member-tag">Version '+esc(v.version_number||1)+'</span><div class="meta">Uploaded: '+esc(v.timestamp||'—')+'</div>'+integrity+'<button data-view="'+esc(v.version_id||'')+'" '+(!i.valid?'disabled':'')+'>View Document</button>'+ocr+'</div>';}
+let ocrPollTimer=null;
+function startOcrPolling(docs){if(ocrPollTimer)clearInterval(ocrPollTimer);if(!(docs||[]).some(x=>['pending','processing'].includes((x.ocr||{}).status)))return;ocrPollTimer=setInterval(async()=>{try{const data=await api('/case/documents?case_id='+encodeURIComponent(caseId));const list=data.documents||[];if(!list.some(x=>['pending','processing'].includes((x.ocr||{}).status))){clearInterval(ocrPollTimer);ocrPollTimer=null;}panelEl.querySelector('.card')?.replaceWith(htmlToNode('<div class="card"><h2>Files for this case</h2>'+(data.integrity_warning_count>0?'<div class="status warning">⚠ Security warning: '+data.integrity_warning_count+' document(s) could not be automatically verified. Viewing is blocked for affected documents.</div>':'')+(list.length?list.map(fileHtml).join(''):'<p class="meta">No files visible to you.</p>')+'</div>'));}catch{}} ,3000);}
+function htmlToNode(html){const t=document.createElement('template');t.innerHTML=html.trim();return t.content.firstChild;}
+panelEl.addEventListener('click',e=>{const b=e.target.closest('[data-view]');if(b&&!b.disabled)openDocument(b.dataset.view);});
 
-if (!token) window.location.href = "login.html";
-if (!caseId) window.location.href = "homepage.html";
+async function openDocument(id){viewerStatus.innerHTML='<div class="status info">Checking integrity and opening the original…</div>';viewerOcr.innerHTML='<div class="status info">Loading extracted text…</div>';viewerFrame.src='about:blank';viewerModal.style.display='flex';try{const [file,ocr]=await Promise.all([api('/documents/file/'+encodeURIComponent(id)),api('/documents/ocr-status/'+encodeURIComponent(id))]);viewerStatus.innerHTML='<div class="status success">✓ Integrity verified automatically. Original document is authorized for viewing.</div>';viewerFrame.src=file.url;if(ocr.status==='completed')viewerOcr.innerHTML='<div class="meta">OCR Version '+esc(ocr.ocr_version||1)+' · Confidence: '+(ocr.confidence!=null?esc((Number(ocr.confidence)*100).toFixed(1))+'%':'Not available')+'</div><div class="ocr-text">'+esc(ocr.extracted_text||'No text detected.')+'</div>';else if(ocr.status==='failed')viewerOcr.innerHTML='<div class="status warning">Text extraction failed. Original document remains available.</div>';else viewerOcr.innerHTML='<div class="status info">Text extraction is still processing. Return to Files shortly.</div>';}catch(e){viewerStatus.innerHTML='<div class="status warning">⚠ '+esc(e.message)+'</div>';viewerOcr.innerHTML='';}}
 
+function showUpload(){panelEl.innerHTML='<div class="card"><h2>Upload Photos / Files</h2><label>Document type</label><select id="documentType"><option value="evidence">Evidence</option><option value="witness_statement">Witness Statement</option><option value="suspect_interview">Suspect Interview</option><option value="medical_report">Medical Report</option><option value="forensic_report">Forensic Report</option><option value="postmortem_report">Postmortem Report</option><option value="charge_sheet">Charge Sheet</option><option value="court_order">Court Order</option><option value="judgment">Judgment</option><option value="cctv">CCTV</option><option value="other">Other</option></select><input id="uploadFileInput" type="file" accept=".pdf,.png,.jpg,.jpeg,.doc,.docx,.ppt,.pptx,.txt"><button id="uploadSubmit">Upload & Secure</button><div id="uploadStatus"></div></div>';document.getElementById('uploadSubmit').onclick=upload;}
+async function upload(){const input=document.getElementById('uploadFileInput'),type=document.getElementById('documentType'),status=document.getElementById('uploadStatus'),btn=document.getElementById('uploadSubmit');if(!input.files.length){status.className='status error';status.textContent='Choose a file.';return;}btn.disabled=true;status.className='status info';status.textContent='Uploading and securing document…';const fd=new FormData();fd.append('case_id',caseId);fd.append('document_type',type.value);fd.append('file',input.files[0]);try{const d=await api('/documents/upload',{method:'POST',body:fd});status.className='status success';status.textContent='✓ '+(d.message||'Document uploaded successfully. Text extraction has started automatically.');await showFiles();}catch(e){status.className='status error';status.textContent=e.message;}finally{btn.disabled=false;}}
 
-function esc(value) {
-    return String(value ?? "").replace(/[&<>"']/g, c => ({
-        "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;"
-    }[c]));
-}
-
-function errText(data) {
-    if (typeof data?.detail === "string") return data.detail;
-    if (Array.isArray(data?.detail)) {
-        return data.detail.map(x => {
-            const loc = Array.isArray(x.loc) ? x.loc.join(".") : "field";
-            return loc + ": " + (x.msg || JSON.stringify(x));
-        }).join("; ");
-    }
-    return data?.message || JSON.stringify(data);
-}
-
-async function api(path, options={}) {
-    const response = await fetch(API + path, {
-        ...options,
-        headers: {...(options.headers || {}), ...H}
-    });
-
-    const raw = await response.text();
-    let data = {};
-    try { data = raw ? JSON.parse(raw) : {}; }
-    catch { data = {detail: raw}; }
-
-    if (!response.ok) {
-        throw new Error("HTTP " + response.status + ": " + errText(data));
-    }
-    return data;
-}
-
-let pendingPurpose = null;
-let pendingAction = null;
-
-async function protectedAction(purpose, action) {
-    pendingPurpose = purpose;
-    pendingAction = action;
-
-    try {
-        const data = await api("/security/request-otp", {
-            method:"POST",
-            headers:{"Content-Type":"application/json"},
-            body:JSON.stringify({purpose, case_id:caseId})
-        });
-
-        otpStatusEl.textContent = data.message || "Enter the code sent to your official email.";
-        otpCodeEl.value = "";
-        otpModalEl.style.display = "flex";
-        setTimeout(() => otpCodeEl.focus(), 50);
-    } catch (error) {
-        alert(error.message);
-    }
-}
-
-async function verifyOtp() {
-    try {
-        await api("/security/verify-otp", {
-            method:"POST",
-            headers:{"Content-Type":"application/json"},
-            body:JSON.stringify({
-                purpose:pendingPurpose,
-                case_id:caseId,
-                code:otpCodeEl.value.trim()
-            })
-        });
-
-        otpModalEl.style.display = "none";
-
-        if (pendingAction) await pendingAction();
-
-    } catch (error) {
-        otpStatusEl.className = "status error";
-        otpStatusEl.textContent = error.message;
-    }
-}
-
-document.getElementById("verifyOtpBtn").addEventListener("click", verifyOtp);
-document.getElementById("cancelOtpBtn").addEventListener("click", () => {
-    otpModalEl.style.display = "none";
-});
-
-document.getElementById("filesBtn").addEventListener(
-    "click", () => protectedAction("VIEW_FILES", showFiles)
-);
-document.getElementById("uploadBtn").addEventListener(
-    "click", () => protectedAction("UPLOAD_FILE", showUpload)
-);
-document.getElementById("membersBtn").addEventListener(
-    "click", () => protectedAction("MANAGE_MEMBERS", showMembers)
-);
-
-async function showFiles() {
-    try {
-        const data = await api("/case/documents?case_id=" + encodeURIComponent(caseId));
-        const docs = Array.isArray(data.documents) ? data.documents : [];
-        const warnings = docs.filter(x => x.integrity && x.integrity.status !== "VERIFIED");
-
-        panelEl.innerHTML = `
-        <div class="card">
-            <h2>Files for this case</h2>
-            ${warnings.length ? `
-                <div class="integrity bad">
-                    ⚠ Security warning: ${warnings.length} document${warnings.length > 1 ? "s" : ""} failed or could not complete an automatic integrity check. Review the warning shown on the affected document.
-                </div>` : `
-                <div class="integrity ok">✓ All displayed documents passed automatic integrity verification.</div>`}
-            ${docs.length ? docs.map(fileHtml).join("") : `<p class="meta">No files visible to you.</p>`}
-        </div>`;
-
-        // OCR runs in the background after upload. Poll only records that are still processing.
-        docs.forEach(d => {
-            if (d.ocr?.status === "PROCESSING") pollOCR(d.version?.version_id);
-        });
-    } catch (error) {
-        panelEl.innerHTML = `<div class="status error">${esc(error.message)}</div>`;
-    }
-}
-
-function integrityHtml(i) {
-    const status = i?.status || "UNKNOWN";
-    if (status === "VERIFIED") {
-        return `<div class="integrity ok">✓ Integrity verified automatically</div>`;
-    }
-    if (status === "WARNING") {
-        return `<div class="integrity warn">⚠ ${esc(i.message || "Integrity verification requires attention.")}</div>`;
-    }
-    return `<div class="integrity bad">⚠ ${esc(i?.message || "Integrity could not be verified.")}</div>`;
-}
-
-function ocrHtml(v, ocr) {
-    const status = ocr?.status || "NOT_STARTED";
-    const id = esc(v?.version_id || "");
-    if (status === "COMPLETED") {
-        const confidence = ocr.confidence == null ? "Not available" : `${(Number(ocr.confidence) * 100).toFixed(1)}%`;
-        const text = (ocr.extracted_text || "").trim();
-        return `
-            <div class="ocr-result success" id="ocr-${id}">
-                <b>Extracted Text · OCR Version ${esc(ocr.ocr_version || 1)}</b>
-                <div class="ocr-confidence">Confidence: ${esc(confidence)}</div>
-                <div class="ocr-text">${esc(text || "No text could be detected.")}</div>
-            </div>`;
-    }
-    if (status === "PROCESSING") {
-        return `<div class="ocr-result loading" id="ocr-${id}">Extracting text automatically…</div>`;
-    }
-    if (status === "FAILED") {
-        return `<div class="ocr-result error" id="ocr-${id}">OCR could not extract text from this document. The original file is unchanged.</div>`;
-    }
-    if (status === "NOT_CONFIGURED") {
-        return `<div class="ocr-result error" id="ocr-${id}">OCR storage is not configured yet.</div>`;
-    }
-    return `<div class="ocr-result loading" id="ocr-${id}">OCR will be processed automatically.</div>`;
-}
-
-function fileHtml(x) {
-    const v = x.version || {};
-    const versionNo = v.version_number || 1;
-    const versionId = esc(v.version_id || "");
-    const canView = x.integrity?.status === "VERIFIED";
-    return `
-    <div class="file">
-        <div class="file-title">Document <span class="version-badge">Version ${esc(versionNo)}</span></div>
-        <div class="meta">Uploaded: ${esc(v.timestamp || "—")}</div>
-        ${integrityHtml(x.integrity)}
-        <div class="actions">
-            ${canView
-                ? `<button data-view="${versionId}">View Original</button>`
-                : `<button disabled title="Viewing is blocked until integrity can be verified">View Original</button>`}
-        </div>
-        ${ocrHtml(v, x.ocr)}
-    </div>`;
-}
-
-async function viewFile(id) {
-    // Open a tab immediately so browser popup blockers do not reject the async response.
-    const tab = window.open("about:blank", "_blank");
-    try {
-        if (!tab) throw new Error("Please allow pop-ups for this site to view the document.");
-        const response = await fetch(API + "/documents/file/" + encodeURIComponent(id), {headers:H});
-        if (!response.ok) {
-            const raw = await response.text();
-            let data = {};
-            try { data = raw ? JSON.parse(raw) : {}; } catch { data = {detail:raw}; }
-            throw new Error("HTTP " + response.status + ": " + errText(data));
-        }
-        const blob = await response.blob();
-        const url = URL.createObjectURL(blob);
-        tab.location.href = url;
-        setTimeout(() => URL.revokeObjectURL(url), 120000);
-    } catch (error) {
-        if (tab && !tab.closed) tab.close();
-        alert("Document could not be opened.\n\n" + error.message);
-    }
-}
-
-async function pollOCR(id, tries=0) {
-    if (!id || tries > 45) return;
-    try {
-        const data = await api("/documents/ocr/" + encodeURIComponent(id));
-        const target = document.getElementById("ocr-" + id);
-        if (!target) return;
-        const v = {version_id:id};
-        target.outerHTML = ocrHtml(v, data);
-        if (data.status === "PROCESSING") {
-            setTimeout(() => pollOCR(id, tries + 1), 4000);
-        }
-    } catch (_) {
-        setTimeout(() => pollOCR(id, tries + 1), 5000);
-    }
-}
-
-function showUpload() {
-    panelEl.innerHTML = `
-    <div class="card">
-        <h2>Upload Photos / Files</h2>
-        <label>Document type</label>
-        <select id="documentType">
-            <option value="evidence">Evidence</option>
-            <option value="witness_statement">Witness Statement</option>
-            <option value="forensic_report">Forensic Report</option>
-            <option value="postmortem_report">Postmortem Report</option>
-            <option value="charge_sheet">Charge Sheet</option>
-            <option value="court_order">Court Order</option>
-            <option value="judgment">Judgment</option>
-        </select>
-        <input id="uploadFileInput" type="file"
-            accept=".pdf,.png,.jpg,.jpeg,.doc,.docx,.ppt,.pptx,.txt">
-        <button id="uploadSubmit">Upload & Sign</button>
-        <div id="uploadStatus"></div>
-    </div>`;
-
-    document.getElementById("uploadSubmit").addEventListener("click", upload);
-}
-
-async function upload() {
-    const fileInput = document.getElementById("uploadFileInput");
-    const typeInput = document.getElementById("documentType");
-    const status = document.getElementById("uploadStatus");
-
-    if (!fileInput.files.length) {
-        status.className = "status error";
-        status.textContent = "Choose a file.";
-        return;
-    }
-
-    const fd = new FormData();
-    fd.append("case_id", caseId);
-    fd.append("document_type", typeInput.value);
-    fd.append("file", fileInput.files[0]);
-
-    try {
-        const data = await api("/documents/upload", {
-            method:"POST",
-            body:fd
-        });
-
-        status.className = "status success";
-        status.textContent = data.message || "Uploaded and signed.";
-        setTimeout(showFiles, 500);
-    } catch (error) {
-        status.className = "status error";
-        status.textContent = error.message;
-    }
-}
-
-async function showMembers() {
-    try {
-        const data = await api("/case/members?case_id=" + encodeURIComponent(caseId));
-
-        let html = `
-        <div class="card">
-            <h2>Members</h2>
-            ${
-                data.members.map(m => `
-                <div class="member">
-                    <b>${esc(m.users?.employee_registry?.full_name || m.users?.employee_id || "User")}</b>
-                    <div class="meta">
-                        ${esc(m.permission_level)} ·
-                        ${(m.allowed_document_types || []).map(esc).join(", ")}
-                    </div>
-                </div>`).join("")
-            }`;
-
-        if (data.my_access.permission_level === "grant") {
-            html += `
-                <hr>
-                <h2>Add Member</h2>
-                <input id="memberSearch" placeholder="Search employee name or ID">
-                <div id="memberResults"></div>`;
-        }
-
-        html += "</div>";
-        panelEl.innerHTML = html;
-
-        const search = document.getElementById("memberSearch");
-        if (search) {
-            let timer;
-            search.addEventListener("input", () => {
-                clearTimeout(timer);
-                const q = search.value.trim();
-                if (q.length < 2) return;
-
-                timer = setTimeout(() => searchMembers(q), 250);
-            });
-        }
-
-    } catch (error) {
-        panelEl.innerHTML = `<div class="status error">${esc(error.message)}</div>`;
-    }
-}
-
-async function searchMembers(q) {
-    const results = document.getElementById("memberResults");
-
-    try {
-        const data = await api(
-            "/case/search-members?case_id=" +
-            encodeURIComponent(caseId) +
-            "&q=" + encodeURIComponent(q)
-        );
-
-        results.innerHTML = data.length
-            ? data.map(x => `
-                <div class="result">
-                    <b>${esc(x.full_name)}</b>
-                    <div class="meta">${esc(x.employee_id)} · ${esc(x.official_email)}</div>
-                    <button data-select-member="${esc(x.employee_id)}">Select</button>
-                </div>`).join("")
-            : `<p class="meta">No results.</p>`;
-
-        results.querySelectorAll("[data-select-member]").forEach(btn => {
-            btn.addEventListener("click", () => openGrant(btn.dataset.selectMember));
-        });
-
-    } catch (error) {
-        results.innerHTML = `<div class="status error">${esc(error.message)}</div>`;
-    }
-}
-
-async function openGrant(employeeId) {
-    try {
-        const data = await api(
-            "/case/invite-options?case_id=" + encodeURIComponent(caseId)
-        );
-
-        const checks = data.allowed_document_types.map(t => `
-            <label class="check">
-                <input type="checkbox" class="grantType" checked value="${esc(t)}">
-                ${esc(t.replaceAll("_"," "))}
-            </label>`).join("");
-
-        panelEl.innerHTML = `
-        <div class="card">
-            <h2>Grant Access</h2>
-            <p>Employee: <b>${esc(employeeId)}</b></p>
-
-            <label>Permission</label>
-            <select id="permission">
-                <option value="read">Read only</option>
-                <option value="upload">Upload</option>
-                <option value="sign">Sign</option>
-                <option value="grant">Grant</option>
-            </select>
-
-            <label>Documents</label>
-            <div class="checks">${checks}</div>
-
-            <button id="confirmGrant">Confirm Grant</button>
-            <button class="gray" id="cancelGrant">Cancel</button>
-            <div id="grantStatus"></div>
-        </div>`;
-
-        document.getElementById("confirmGrant")
-            .addEventListener("click", () => submitGrant(employeeId));
-        document.getElementById("cancelGrant")
-            .addEventListener("click", showMembers);
-
-    } catch (error) {
-        alert(error.message);
-    }
-}
-
-async function submitGrant(employeeId) {
-    const types = [...document.querySelectorAll(".grantType:checked")]
-        .map(x => x.value);
-
-    const status = document.getElementById("grantStatus");
-
-    if (!types.length) {
-        status.className = "status error";
-        status.textContent = "Select at least one document type.";
-        return;
-    }
-
-    try {
-        const data = await api("/case/invite", {
-            method:"POST",
-            headers:{"Content-Type":"application/json"},
-            body:JSON.stringify({
-                case_id:caseId,
-                employee_id:employeeId,
-                permission_level:document.getElementById("permission").value,
-                allowed_document_types:types
-            })
-        });
-
-        status.className = "status success";
-        status.textContent = data.message || "Access granted.";
-        setTimeout(showMembers, 700);
-
-    } catch (error) {
-        status.className = "status error";
-        status.textContent = error.message;
-    }
-}
+async function showMembers(){try{const data=await api('/case/members?case_id='+encodeURIComponent(caseId));let html='<div class="card"><h2>Members</h2>';const members=data.members||[];if(members.length)members.forEach(m=>{const u=m.users||{};html+='<div class="member"><b>'+esc(u.employee_registry?.full_name||u.employee_id||'User')+'</b><div class="meta">'+esc(m.permission_level||'')+' · '+(m.allowed_document_types||[]).map(esc).join(', ')+'</div></div>';});else html+='<p class="meta">No internal members found.</p>';const ext=data.external_participants||[];if(ext.length){html+='<h3 style="margin-top:24px">External Participants</h3>';ext.forEach(p=>html+='<div class="member"><b>'+esc(p.name)+'</b><div class="meta">'+esc(p.organization_name||'')+' · '+esc(p.role||'')+' · '+esc(p.status||'')+'</div><div class="meta">'+(p.allowed_document_types||[]).map(t=>'<span class="member-tag">'+esc(t.replaceAll('_',' '))+'</span>').join('')+'</div></div>');}if(data.my_access?.permission_level==='grant')html+='<hr><h2>Add Member</h2><input id="memberSearch" placeholder="Search employee name or ID"><div id="memberResults"></div><button class="green" id="externalOpen">+ Invite External Participant</button><div id="externalPanel"></div>';html+='</div>';panelEl.innerHTML=html;const search=document.getElementById('memberSearch');if(search){let timer;search.oninput=()=>{clearTimeout(timer);const q=search.value.trim();if(q.length<2){document.getElementById('memberResults').innerHTML='';return;}timer=setTimeout(()=>searchMembers(q),250);};}const extBtn=document.getElementById('externalOpen');if(extBtn)extBtn.onclick=openExternalInvite;}catch(e){panelEl.innerHTML='<div class="status error">'+esc(e.message)+'</div>';}}
+async function searchMembers(q){const results=document.getElementById('memberResults');try{const data=await api('/case/search-members?case_id='+encodeURIComponent(caseId)+'&q='+encodeURIComponent(q));results.innerHTML=data.length?data.map(x=>'<div class="result"><b>'+esc(x.full_name)+'</b><div class="meta">'+esc(x.employee_id)+' · '+esc(x.official_email)+'</div><button data-select-member="'+esc(x.employee_id)+'">Select</button></div>').join(''):'<p class="meta">No results.</p>';results.querySelectorAll('[data-select-member]').forEach(b=>b.onclick=()=>openGrant(b.dataset.selectMember));}catch(e){results.innerHTML='<div class="status error">'+esc(e.message)+'</div>';}}
+async function openGrant(employeeId){try{const d=await api('/case/invite-options?case_id='+encodeURIComponent(caseId));const checks=(d.allowed_document_types||[]).map(t=>'<label class="check"><input type="checkbox" class="grantType" checked value="'+esc(t)+'"> '+esc(t.replaceAll('_',' '))+'</label>').join('');panelEl.innerHTML='<div class="card"><h2>Grant Access</h2><p>Employee: <b>'+esc(employeeId)+'</b></p><label>Permission</label><select id="permission"><option value="read">Read only</option><option value="upload">Upload</option><option value="sign">Sign</option><option value="grant">Grant</option></select><label>Documents</label><div class="checks">'+checks+'</div><button id="confirmGrant">Confirm Grant</button><button class="gray" id="cancelGrant">Cancel</button><div id="grantStatus"></div></div>';document.getElementById('confirmGrant').onclick=()=>submitGrant(employeeId);document.getElementById('cancelGrant').onclick=showMembers;}catch(e){alert(e.message);}}
+async function submitGrant(employeeId){const types=[...document.querySelectorAll('.grantType:checked')].map(x=>x.value),status=document.getElementById('grantStatus');if(!types.length){status.className='status error';status.textContent='Select at least one document type.';return;}try{const d=await api('/case/invite',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({case_id:caseId,employee_id:employeeId,permission_level:document.getElementById('permission').value,allowed_document_types:types})});status.className='status success';status.textContent=d.message||'Access granted.';setTimeout(showMembers,700);}catch(e){status.className='status error';status.textContent=e.message;}}
+async function openExternalInvite(){try{const d=await api('/case/invite-options?case_id='+encodeURIComponent(caseId));const checks=(d.allowed_document_types||[]).map(t=>'<label class="check"><input type="checkbox" class="extType" checked value="'+esc(t)+'"> '+esc(t.replaceAll('_',' '))+'</label>').join('');const orgs=(d.external_organization_types||['police','fsl','government_hospital','private_hospital','private_lab','court','prosecution','media','legal','academic','ngo','other']).map(x=>'<option value="'+esc(x)+'">'+esc(x.replaceAll('_',' '))+'</option>').join('');document.getElementById('externalPanel').innerHTML='<div class="card"><h2>Invite External Participant</h2><label>Full name</label><input id="extName"><label>Email</label><input id="extEmail" type="email"><label>Organization</label><input id="extOrg"><label>Organization type</label><select id="extOrgType">'+orgs+'</select><label>Role / Profession</label><input id="extRole" placeholder="Doctor, FSL analyst, lawyer, journalist, expert…"><label>Purpose</label><textarea id="extPurpose" style="min-height:80px" placeholder="Why is this participant being given access?"></textarea><label>Permission</label><select id="extPermission"><option value="read">Read only</option><option value="upload">Upload</option><option value="sign">Sign</option></select><label>Access duration</label><select id="extHours"><option value="24">24 hours</option><option value="72" selected>72 hours</option><option value="168">7 days</option></select><label>Documents</label><div class="checks">'+checks+'</div><button class="green" id="sendExternal">Send Invitation</button><button class="gray" id="cancelExternal">Cancel</button><div id="extStatus"></div></div>';document.getElementById('sendExternal').onclick=sendExternal;document.getElementById('cancelExternal').onclick=showMembers;}catch(e){alert(e.message);}}
+async function sendExternal(){const status=document.getElementById('extStatus'),types=[...document.querySelectorAll('.extType:checked')].map(x=>x.value);const payload={case_id:caseId,name:document.getElementById('extName').value.trim(),email:document.getElementById('extEmail').value.trim(),organization_name:document.getElementById('extOrg').value.trim(),organization_type:document.getElementById('extOrgType').value,role:document.getElementById('extRole').value.trim()||'external_participant',purpose:document.getElementById('extPurpose').value.trim(),permission_level:document.getElementById('extPermission').value,allowed_document_types:types,expires_hours:Number(document.getElementById('extHours').value)};if(!payload.name||!payload.email||!types.length){status.className='status error';status.textContent='Name, email and at least one document type are required.';return;}try{const d=await api('/case/invite-external',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});status.className='status success';status.textContent=d.message||'External invitation sent.';setTimeout(showMembers,1000);}catch(e){status.className='status error';status.textContent=e.message;}}
 </script>
 </body>
 </html>
