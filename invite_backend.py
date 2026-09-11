@@ -19,7 +19,7 @@ This version keeps the existing session/TOTP/key/document model, but fixes:
 import os, secrets, hashlib, mimetypes, uuid, json, urllib.request, urllib.error
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-
+import threading
 import bcrypt
 import pyotp
 from dotenv import load_dotenv
