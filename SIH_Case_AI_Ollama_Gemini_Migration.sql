@@ -32,9 +32,14 @@ SELECT 'Secunderabad Police','police','Secunderabad, Hyderabad','demo.police'
 WHERE NOT EXISTS (SELECT 1 FROM public.departments WHERE name='Secunderabad Police');
 
 INSERT INTO public.employee_registry (employee_id,full_name,department_id,rank,designation,station_name,official_email,registry_status)
-SELECT 'SEC-PS-HEAD-001','Secunderabad Police Head',d.department_id,'Department Head','Department Head','Secunderabad Police','secunderabad.head@demo.police','verified'
+SELECT 'SEC-PS-HEAD-001','Secunderabad Police Head',d.department_id,'Department Head','Department Head','Secunderabad Police','karthikpeddoju1006@gmail.com','verified'
 FROM public.departments d WHERE d.name='Secunderabad Police'
 AND NOT EXISTS (SELECT 1 FROM public.employee_registry WHERE employee_id='SEC-PS-HEAD-001');
+
+-- Ensure the new Head's official email is your email.
+UPDATE public.employee_registry
+SET official_email = 'karthikpeddoju1006@gmail.com'
+WHERE employee_id = 'SEC-PS-HEAD-001';
 
 INSERT INTO public.users (employee_id,password_hash,account_status,must_change_password)
 SELECT 'SEC-PS-HEAD-001',crypt('Demo@1234',gen_salt('bf')),'active',false
@@ -83,6 +88,18 @@ CREATE INDEX IF NOT EXISTS idx_case_ai_documents_case
     ON public.case_ai_documents(case_id);
 CREATE INDEX IF NOT EXISTS idx_case_ai_documents_status
     ON public.case_ai_documents(status);
+
+-- Processing telemetry for user-visible AI progress. Safe to re-run.
+ALTER TABLE public.case_ai_documents
+    ADD COLUMN IF NOT EXISTS queued_at timestamptz;
+ALTER TABLE public.case_ai_documents
+    ADD COLUMN IF NOT EXISTS started_at timestamptz;
+ALTER TABLE public.case_ai_documents
+    ADD COLUMN IF NOT EXISTS stage text;
+ALTER TABLE public.case_ai_documents
+    ADD COLUMN IF NOT EXISTS progress_percent integer NOT NULL DEFAULT 0;
+ALTER TABLE public.case_ai_documents
+    ADD COLUMN IF NOT EXISTS estimated_seconds integer;
 
 -- 3. Searchable case-specific chunks. These are derived data only.
 CREATE TABLE IF NOT EXISTS public.case_ai_chunks (

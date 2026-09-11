@@ -1367,13 +1367,13 @@ def case_documents(case_id: str, authorization: str | None = Header(default=None
             ai={"status":"not_started","extracted_text":"","pages":[]}
             if v.get("version_id"):
                 ar=(supabase.table("case_ai_documents")
-                    .select("status,provider,model,fallback_used,extracted_text,pages,confidence,error,completed_at")
+                    .select("status,provider,model,fallback_used,extracted_text,pages,confidence,error,created_at,queued_at,started_at,completed_at,stage,progress_percent,estimated_seconds")
                     .eq("version_id",v["version_id"]).limit(1).execute())
                 if ar.data: ai=ar.data[0]
             visible.append({
                 "document_id":d["document_id"],"case_id":d["case_id"],"document_type":d["document_type"],"file_type":d["file_type"],
                 "uploader_id":d["uploader_id"],"current_version_id":d["current_version_id"],
-                "filename":"Document", "integrity":integrity, "ai":ai,
+                "filename":Path(v.get("storage_path") or "").name or "Document", "integrity":integrity, "ai":ai,
                 "version":{"version_id":v.get("version_id"),"version_number":v.get("version_number"),"timestamp":v.get("timestamp")}
             })
         c=supabase.table("cases").select("ai_enabled,head_user_id,created_by").eq("case_id",case_id).limit(1).execute()
@@ -1708,7 +1708,7 @@ def case_invite(req: CaseInviteRequest, authorization: str | None = Header(defau
 # Ollama Cloud with Gemini as an automatic fallback. Native text extraction
 # is still used for digital PDFs/DOCX/PPTX/TXT because it is instant and
 # avoids spending AI quota when OCR is unnecessary.
-from ai_engine import extract_document, answer_question, chunk_pages
+from ai_engine import extract_document, answer_question, chunk_pages, estimate_document_seconds
 
 
 def _case_ai_enabled(case_id: str) -> bool:
@@ -1717,6 +1717,7 @@ def _case_ai_enabled(case_id: str) -> bool:
 
 
 def _queue_ai_job(version_id: str):
+    """Create exactly one AI job record for an immutable document version."""
     try:
         vr = (supabase.table("document_versions")
               .select("version_id,document_id,storage_path")
@@ -1735,17 +1736,26 @@ def _queue_ai_job(version_id: str):
         existing = (supabase.table("case_ai_documents")
                     .select("ai_document_id,status")
                     .eq("version_id", version_id).limit(1).execute())
+        queued = iso(now())
         if existing.data:
-            if existing.data[0].get("status") in {"completed", "processing"}:
+            status = existing.data[0].get("status")
+            # Immutable version: never re-run a completed extraction automatically.
+            if status in {"completed", "processing", "pending"}:
                 return
-            supabase.table("case_ai_documents").update({"status":"pending","error":None}).eq("ai_document_id", existing.data[0]["ai_document_id"]).execute()
+            supabase.table("case_ai_documents").update({
+                "status": "pending", "error": None, "stage": "queued",
+                "progress_percent": 0, "queued_at": queued, "started_at": None,
+                "completed_at": None
+            }).eq("ai_document_id", existing.data[0]["ai_document_id"]).execute()
         else:
             supabase.table("case_ai_documents").insert({
                 "case_id": d["case_id"], "document_id": d["document_id"],
                 "version_id": version_id, "document_type": d["document_type"],
-                "status": "pending"
+                "status": "pending", "stage": "queued", "progress_percent": 0,
+                "queued_at": queued
             }).execute()
     except Exception:
+        # Upload must remain successful even if AI tracking cannot be initialized.
         pass
 
 
@@ -1757,29 +1767,44 @@ def _process_ai_job(version_id: str):
         if not r.data:
             return
         row = r.data[0]
-        supabase.table("case_ai_documents").update({"status":"processing","error":None}).eq("ai_document_id", row["ai_document_id"]).execute()
+        ai_id = row["ai_document_id"]
+        started = now()
+
+        def progress(stage: str, percent: int | None = None):
+            update = {"stage": stage}
+            if percent is not None:
+                update["progress_percent"] = max(0, min(99, int(percent)))
+            supabase.table("case_ai_documents").update(update).eq("ai_document_id", ai_id).execute()
+
+        supabase.table("case_ai_documents").update({
+            "status": "processing", "error": None, "started_at": iso(started),
+            "stage": "downloading_document", "progress_percent": 5
+        }).eq("ai_document_id", ai_id).execute()
+
         vr = (supabase.table("document_versions")
               .select("storage_path").eq("version_id", version_id).limit(1).execute())
         if not vr.data:
             raise RuntimeError("Document version not found.")
         data = supabase.storage.from_(DOCUMENT_BUCKET).download(vr.data[0]["storage_path"])
         filename = Path(vr.data[0]["storage_path"]).name
-        result = extract_document(data, filename)
+        estimate = estimate_document_seconds(data, filename)
+        supabase.table("case_ai_documents").update({
+            "stage": "document_loaded", "progress_percent": 10,
+            "estimated_seconds": estimate
+        }).eq("ai_document_id", ai_id).execute()
+
+        progress("sending_to_ai", 15)
+        result = extract_document(data, filename, progress_callback=progress)
+        progress("saving_extracted_text", 88)
         pages = result.get("pages") or []
         text = result.get("text") or ""
         supabase.table("case_ai_documents").update({
-            "status": "completed",
-            "provider": result.get("provider"),
-            "model": result.get("model"),
-            "fallback_used": bool(result.get("fallback_used")),
-            "extracted_text": text,
-            "pages": pages,
-            "confidence": result.get("confidence"),
-            "completed_at": iso(now()),
-            "error": None,
-        }).eq("ai_document_id", row["ai_document_id"]).execute()
-        # Replace chunks only for this immutable version. Previous versions
-        # remain available for audit/history but are not used for current AI.
+            "status": "processing", "provider": result.get("provider"),
+            "model": result.get("model"), "fallback_used": bool(result.get("fallback_used")),
+            "extracted_text": text, "pages": pages, "confidence": result.get("confidence"),
+            "stage": "creating_searchable_chunks", "progress_percent": 92,
+        }).eq("ai_document_id", ai_id).execute()
+
         supabase.table("case_ai_chunks").delete().eq("version_id", version_id).execute()
         chunks = chunk_pages(pages, AI_CHUNK_SIZE)
         if chunks:
@@ -1789,11 +1814,17 @@ def _process_ai_job(version_id: str):
                  "chunk_index": c["chunk_index"], "text": c["text"]}
                 for c in chunks
             ]).execute()
+
+        supabase.table("case_ai_documents").update({
+            "status": "completed", "stage": "completed", "progress_percent": 100,
+            "completed_at": iso(now()), "error": None,
+        }).eq("ai_document_id", ai_id).execute()
     except Exception as exc:
         if row:
             try:
                 supabase.table("case_ai_documents").update({
-                    "status":"failed", "error":error_text(exc), "completed_at":iso(now())
+                    "status": "failed", "stage": "failed", "progress_percent": 0,
+                    "error": error_text(exc), "completed_at": iso(now())
                 }).eq("ai_document_id", row["ai_document_id"]).execute()
             except Exception:
                 pass
@@ -1835,15 +1866,20 @@ def case_ai_status(case_id: str, authorization: str | None = Header(default=None
             head_name=((hr.data[0].get("employee_registry") or {}).get("full_name") or "Unknown")
     except Exception:
         pass
-    pending = supabase.table("case_ai_documents").select("ai_document_id", count="exact").eq("case_id", case_id).in_("status", ["pending","processing"]).execute()
+
+    jobs = (supabase.table("case_ai_documents")
+            .select("ai_document_id,document_id,version_id,document_type,status,provider,model,fallback_used,error,created_at,queued_at,started_at,completed_at,stage,progress_percent,estimated_seconds")
+            .eq("case_id", case_id).order("created_at", desc=True).execute().data or [])
+    pending = [j for j in jobs if j.get("status") in {"pending", "processing"}]
     return {
         "enabled": bool(c.get("ai_enabled")),
         "is_head": u["user_id"] == head_id,
         "head_user_id": head_id,
         "head_name": head_name,
-        "provider": c.get("ai_provider") or "ollama",
+        "provider": c.get("ai_provider") or "ollama+gemini-fallback",
         "model": c.get("ai_model") or AI_OLLAMA_MODEL,
-        "pending_count": pending.count or 0,
+        "pending_count": len(pending),
+        "jobs": jobs[:25],
     }
 
 
@@ -1884,7 +1920,7 @@ def document_ai_status(version_id: str, authorization: str | None = Header(defau
     m = membership(u["user_id"], d["case_id"])
     if d["document_type"] not in set(m.get("allowed_document_types") or []):
         raise HTTPException(403, "You are not authorized to view this document.")
-    r = supabase.table("case_ai_documents").select("status,provider,model,fallback_used,extracted_text,pages,confidence,error,completed_at").eq("version_id", version_id).limit(1).execute()
+    r = supabase.table("case_ai_documents").select("status,provider,model,fallback_used,extracted_text,pages,confidence,error,created_at,queued_at,started_at,completed_at,stage,progress_percent,estimated_seconds").eq("version_id", version_id).limit(1).execute()
     return (r.data[0] if r.data else {"status":"not_started","extracted_text":"","pages":[]})
 
 # Backward-compatible route name so older frontend builds do not break.

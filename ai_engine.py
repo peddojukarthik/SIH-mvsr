@@ -15,7 +15,7 @@ import re
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PIL import Image
 
@@ -181,7 +181,7 @@ def _gemini_generate(prompt: str, data: bytes | None = None, mime_type: str | No
     return text
 
 
-def _gemini_document(data: bytes, filename: str) -> list[dict]:
+def _gemini_document(data: bytes, filename: str, progress_callback: Callable[[str, int | None], None] | None = None) -> list[dict]:
     ext = Path(filename).suffix.lower()
     mime = "application/pdf" if ext == ".pdf" else "image/png"
     if ext != ".pdf":
@@ -191,6 +191,8 @@ def _gemini_document(data: bytes, filename: str) -> list[dict]:
         "numbers, IDs, headings and table values. Do not summarize or invent. "
         "Return plain text with page headings like '--- Page 1 ---'."
     )
+    if progress_callback:
+        progress_callback("gemini_request", None)
     text = _gemini_generate(prompt, data, mime)
     pages = []
     current = None
@@ -209,7 +211,26 @@ def _gemini_document(data: bytes, filename: str) -> list[dict]:
     return pages
 
 
-def extract_document(data: bytes, filename: str) -> dict:
+def estimate_document_seconds(data: bytes, filename: str) -> int:
+    """Return a conservative user-facing estimate; never a guarantee."""
+    ext = Path(filename).suffix.lower()
+    try:
+        if ext == ".pdf":
+            native = _native_pages(data, filename)
+            scanned = sum(1 for p in native if not p["text"].strip())
+            if scanned == 0:
+                return 5
+            return min(300, 20 + scanned * 35)
+        if ext in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}:
+            return 45
+        if ext in {".txt", ".docx", ".pptx"}:
+            return 5
+    except Exception:
+        pass
+    return 60
+
+
+def extract_document(data: bytes, filename: str, progress_callback: Callable[[str, int | None], None] | None = None) -> dict:
     native = _native_pages(data, filename)
     ext = Path(filename).suffix.lower()
 
@@ -229,26 +250,42 @@ def extract_document(data: bytes, filename: str) -> dict:
         try:
             images = _render_pdf_pages(data, scanned)
             by_page = {p["page"]: p for p in native}
-            for page_no in scanned:
-                by_page[page_no]["text"] = _ollama_vision(images[page_no], page_no)
+            total = len(scanned)
+            for idx, page_no in enumerate(scanned, 1):
+                if progress_callback:
+                    progress_callback(f"ollama_page_{page_no}", int(20 + (idx - 1) * 60 / max(total, 1)))
+                try:
+                    by_page[page_no]["text"] = _ollama_vision(images[page_no], page_no)
+                except Exception:
+                    if progress_callback:
+                        progress_callback("ollama_failed_switching_to_gemini", int(20 + (idx - 1) * 60 / max(total, 1)))
+                    raise
                 by_page[page_no]["source"] = "ollama"
                 by_page[page_no]["confidence"] = None
+                if progress_callback:
+                    progress_callback(f"ollama_page_{page_no}_complete", int(20 + idx * 60 / max(total, 1)))
             pages = [by_page[n] for n in sorted(by_page)]
             return {"text": "\n\n".join(f"--- Page {p['page']} ---\n{p['text']}" for p in pages if p['text'].strip()),
                     "pages": pages, "confidence": None, "provider": "ollama", "model": OLLAMA_MODEL, "fallback_used": False}
         except Exception:
-            pages = _gemini_document(data, filename)
+            pages = _gemini_document(data, filename, progress_callback)
             return {"text": "\n\n".join(f"--- Page {p['page']} ---\n{p['text']}" for p in pages),
                     "pages": pages, "confidence": None, "provider": "gemini", "model": GEMINI_MODEL, "fallback_used": True}
 
     if ext in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}:
         try:
+            if progress_callback:
+                progress_callback("ollama_request", 20)
             text = _ollama_vision(_image_to_png(data), 1)
+            if progress_callback:
+                progress_callback("ollama_complete", 85)
             pages = [{"page": 1, "text": text, "confidence": None, "source": "ollama"}]
             return {"text": text, "pages": pages, "confidence": None,
                     "provider": "ollama", "model": OLLAMA_MODEL, "fallback_used": False}
         except Exception:
-            pages = _gemini_document(data, filename)
+            if progress_callback:
+                progress_callback("ollama_failed_switching_to_gemini", 25)
+            pages = _gemini_document(data, filename, progress_callback)
             return {"text": "\n\n".join(f"--- Page {p['page']} ---\n{p['text']}" for p in pages),
                     "pages": pages, "confidence": None, "provider": "gemini", "model": GEMINI_MODEL, "fallback_used": True}
 
