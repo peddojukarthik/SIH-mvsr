@@ -16,11 +16,10 @@ This version keeps the existing session/TOTP/key/document model, but fixes:
 - no separate invite page is required
 """
 
-import os, secrets, hashlib, mimetypes, uuid, json, urllib.request, urllib.error
+import os, secrets, hashlib, mimetypes, uuid, json, time, threading, urllib.request, urllib.error
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-import threading
-import time
+
 import bcrypt
 import pyotp
 from dotenv import load_dotenv
@@ -1835,7 +1834,7 @@ def _process_ai_job(version_id: str):
                 last_exc = None
                 for attempt in range(3):
                     try:
-                        supabase.table("case_ai_chunks").insert(batch).execute()
+                        supabase.table("case_ai_chunks").upsert(batch, on_conflict="version_id,chunk_index", ignore_duplicates=False).execute()
                         last_exc = None
                         break
                     except Exception as exc:
