@@ -300,11 +300,22 @@ def answer_question(prompt: str) -> dict:
 
 
 def chunk_pages(pages: list[dict], chunk_size: int = 3500) -> list[dict]:
+    """Split pages into chunks with a GLOBAL index per immutable version.
+
+    The database constraint is UNIQUE(version_id, chunk_index), so resetting
+    chunk_index to zero on every page causes multi-page documents to fail.
+    """
     chunks = []
+    global_index = 0
     for p in pages:
         text = (p.get("text") or "").strip()
         if not text:
             continue
         for i in range(0, len(text), chunk_size):
-            chunks.append({"page": p.get("page", 1), "chunk_index": i // chunk_size, "text": text[i:i + chunk_size]})
+            chunks.append({
+                "page": p.get("page", 1),
+                "chunk_index": global_index,
+                "text": text[i:i + chunk_size],
+            })
+            global_index += 1
     return chunks

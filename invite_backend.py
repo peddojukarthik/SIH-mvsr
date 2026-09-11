@@ -1587,8 +1587,8 @@ async def upload_document(
         supabase.table("documents").update({"current_version_id": vid, "file_type": ft, "uploader_id": u["user_id"]}).eq("document_id", did).execute()
         notify(u["user_id"], "File uploaded", f"{name} uploaded as version {version_number}.", "document_uploaded", case_id=case_id)
         if _case_ai_enabled(case_id):
-            _queue_ai_job(vid)
-            if background_tasks is not None:
+            queued = _queue_ai_job(vid)
+            if queued and background_tasks is not None:
                 background_tasks.add_task(_process_ai_job, vid)
         return {"success": True, "message": f"File uploaded as Version {version_number}.", "document_id": did, "version_id": vid, "version_number": version_number, "file_hash": h, "signature": signed["signature"], "storage_path": path, "ai_queued": _case_ai_enabled(case_id)}
     except HTTPException:
@@ -1710,29 +1710,34 @@ def case_invite(req: CaseInviteRequest, authorization: str | None = Header(defau
 # avoids spending AI quota when OCR is unnecessary.
 from ai_engine import extract_document, answer_question, chunk_pages, estimate_document_seconds
 
+_AI_ACTIVE_VERSIONS: set[str] = set()
+_AI_ACTIVE_LOCK = threading.Lock()
+
 
 def _case_ai_enabled(case_id: str) -> bool:
     r = supabase.table("cases").select("ai_enabled").eq("case_id", case_id).limit(1).execute()
     return bool(r.data and r.data[0].get("ai_enabled"))
 
 
-def _queue_ai_job(version_id: str):
-    """Create exactly one AI job record for an immutable document version."""
+def _queue_ai_job(version_id: str) -> bool:
+    """Create exactly one AI job record for an immutable document version.
+    Returns True only when this call actually queued a job.
+    """
     try:
         vr = (supabase.table("document_versions")
               .select("version_id,document_id,storage_path")
               .eq("version_id", version_id).limit(1).execute())
         if not vr.data:
-            return
+            return False
         v = vr.data[0]
         dr = (supabase.table("documents")
               .select("document_id,case_id,document_type")
               .eq("document_id", v["document_id"]).limit(1).execute())
         if not dr.data:
-            return
+            return False
         d = dr.data[0]
         if not _case_ai_enabled(d["case_id"]):
-            return
+            return False
         existing = (supabase.table("case_ai_documents")
                     .select("ai_document_id,status")
                     .eq("version_id", version_id).limit(1).execute())
@@ -1741,7 +1746,7 @@ def _queue_ai_job(version_id: str):
             status = existing.data[0].get("status")
             # Immutable version: never re-run a completed extraction automatically.
             if status in {"completed", "processing", "pending"}:
-                return
+                return False
             supabase.table("case_ai_documents").update({
                 "status": "pending", "error": None, "stage": "queued",
                 "progress_percent": 0, "queued_at": queued, "started_at": None,
@@ -1754,12 +1759,18 @@ def _queue_ai_job(version_id: str):
                 "status": "pending", "stage": "queued", "progress_percent": 0,
                 "queued_at": queued
             }).execute()
+        return True
     except Exception:
         # Upload must remain successful even if AI tracking cannot be initialized.
-        pass
+        return False
 
 
 def _process_ai_job(version_id: str):
+    # Prevent duplicate in-process workers for the same immutable version.
+    with _AI_ACTIVE_LOCK:
+        if version_id in _AI_ACTIVE_VERSIONS:
+            return
+        _AI_ACTIVE_VERSIONS.add(version_id)
     row = None
     try:
         r = (supabase.table("case_ai_documents")
@@ -1795,6 +1806,11 @@ def _process_ai_job(version_id: str):
 
         progress("sending_to_ai", 15)
         result = extract_document(data, filename, progress_callback=progress)
+        provider = result.get("provider") or "unknown"
+        if provider == "native":
+            progress("native_extraction_complete", 85)
+        else:
+            progress("ai_extraction_complete", 85)
         progress("saving_extracted_text", 88)
         pages = result.get("pages") or []
         text = result.get("text") or ""
@@ -1808,12 +1824,25 @@ def _process_ai_job(version_id: str):
         supabase.table("case_ai_chunks").delete().eq("version_id", version_id).execute()
         chunks = chunk_pages(pages, AI_CHUNK_SIZE)
         if chunks:
-            supabase.table("case_ai_chunks").insert([
-                {"case_id": row["case_id"], "document_id": row["document_id"],
-                 "version_id": version_id, "page_number": c["page"],
-                 "chunk_index": c["chunk_index"], "text": c["text"]}
-                for c in chunks
-            ]).execute()
+            rows = [{"case_id": row["case_id"], "document_id": row["document_id"],
+                     "version_id": version_id, "page_number": c["page"],
+                     "chunk_index": c["chunk_index"], "text": c["text"]}
+                    for c in chunks]
+            # Small batches make Supabase failures less likely on large reports.
+            for start_idx in range(0, len(rows), 50):
+                batch = rows[start_idx:start_idx + 50]
+                last_exc = None
+                for attempt in range(3):
+                    try:
+                        supabase.table("case_ai_chunks").insert(batch).execute()
+                        last_exc = None
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                        if attempt < 2:
+                            time.sleep(1.5 * (attempt + 1))
+                if last_exc is not None:
+                    raise last_exc
 
         supabase.table("case_ai_documents").update({
             "status": "completed", "stage": "completed", "progress_percent": 100,
@@ -1828,6 +1857,9 @@ def _process_ai_job(version_id: str):
                 }).eq("ai_document_id", row["ai_document_id"]).execute()
             except Exception:
                 pass
+    finally:
+        with _AI_ACTIVE_LOCK:
+            _AI_ACTIVE_VERSIONS.discard(version_id)
 
 
 def _is_case_head(user_id: str, case_id: str) -> bool:
@@ -1883,6 +1915,33 @@ def case_ai_status(case_id: str, authorization: str | None = Header(default=None
     }
 
 
+@app.post("/case/ai/retry")
+def retry_case_ai(version_id: str, background_tasks: BackgroundTasks, authorization: str | None = Header(default=None)):
+    u = get_current_user(authorization)
+    vr = supabase.table("document_versions").select("version_id,document_id").eq("version_id", version_id).limit(1).execute()
+    if not vr.data:
+        raise HTTPException(404, "Document version not found.")
+    dr = supabase.table("documents").select("case_id").eq("document_id", vr.data[0]["document_id"]).limit(1).execute()
+    if not dr.data:
+        raise HTTPException(404, "Document not found.")
+    case_id = dr.data[0]["case_id"]
+    membership(u["user_id"], case_id)
+    require_elevated(u, "retrying Case AI extraction", "VIEW_FILES")
+    if not _is_case_head(u["user_id"], case_id):
+        raise HTTPException(403, "Only the case Head can retry Case AI extraction.")
+    if not _case_ai_enabled(case_id):
+        raise HTTPException(400, "Case AI is currently disabled.")
+    r = supabase.table("case_ai_documents").select("status").eq("version_id", version_id).limit(1).execute()
+    if not r.data:
+        raise HTTPException(404, "No AI processing record exists for this version.")
+    if r.data[0].get("status") in {"pending", "processing"}:
+        return {"success": True, "message": "This document is already being processed."}
+    queued = _queue_ai_job(version_id)
+    if queued:
+        background_tasks.add_task(_process_ai_job, version_id)
+    return {"success": True, "message": "AI extraction retry queued. Track the live status in AI Processing Activity."}
+
+
 @app.post("/case/ai/toggle")
 def toggle_case_ai(req: CaseAIToggleRequest, background_tasks: BackgroundTasks, authorization: str | None = Header(default=None)):
     u = get_current_user(authorization)
@@ -1902,8 +1961,9 @@ def toggle_case_ai(req: CaseAIToggleRequest, background_tasks: BackgroundTasks, 
         docs = supabase.table("documents").select("document_id,current_version_id").eq("case_id", req.case_id).execute().data or []
         for d in docs:
             if d.get("current_version_id"):
-                _queue_ai_job(d["current_version_id"])
-                background_tasks.add_task(_process_ai_job, d["current_version_id"])
+                queued = _queue_ai_job(d["current_version_id"])
+                if queued:
+                    background_tasks.add_task(_process_ai_job, d["current_version_id"])
     return {"success": True, "enabled": req.enabled, "message": "Case AI enabled." if req.enabled else "Case AI disabled."}
 
 
@@ -2073,8 +2133,8 @@ async def external_upload(background_tasks: BackgroundTasks, token: str = Form(.
     supabase.table("document_versions").insert({"version_id":vid,"document_id":did,"storage_path":path,"file_hash":h,"previous_version_hash":prev,"version_number":vn,"signing_key_id":None,"signature":"EXTERNAL_HASH_ONLY","co_signature":None,"uploader_id":None,"timestamp":iso(now())}).execute()
     supabase.table("documents").update({"current_version_id":vid}).eq("document_id",did).execute()
     if _case_ai_enabled(p["case_id"]):
-        _queue_ai_job(vid)
-        if background_tasks is not None:
+        queued = _queue_ai_job(vid)
+        if queued and background_tasks is not None:
             background_tasks.add_task(_process_ai_job, vid)
     return {"success":True,"message":f"Uploaded as Version {vn}.","version_number":vn,"document_id":did,"version_id":vid,"file_hash":h,"ai_queued":_case_ai_enabled(p["case_id"])}
 

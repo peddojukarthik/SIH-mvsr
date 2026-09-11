@@ -32,3 +32,11 @@ Required AI environment variables remain:
 
 ## Frontend
 Replace the deployed `case-detail.html` with the included version. It keeps the Files, Upload, Members, external participant and Case AI tabs.
+
+## Tracking/duplicate fix
+- Multi-page documents now use a global `chunk_index` per immutable version, matching `UNIQUE(version_id, chunk_index)`.
+- Duplicate background workers for the same version are prevented in-process.
+- Upload/enable paths only start a worker when a job was actually queued.
+- Chunk writes use batches with retries to reduce transient Supabase disconnect failures.
+- Failed jobs can be retried by the Case Head from AI Processing Activity.
+- Native digital documents explicitly show that cloud AI was not required.
