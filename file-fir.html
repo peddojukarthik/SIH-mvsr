@@ -3,154 +3,98 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>File an FIR</title>
+<title>Secure DMS — File FIR</title>
 <style>
-body{font-family:system-ui,sans-serif;max-width:600px;margin:40px auto;padding:0 20px;color:#172033;background:#f8fafc}
-.card{background:white;border:1px solid #dbe3ef;border-radius:14px;padding:24px;box-shadow:0 3px 12px #0000000b}
-h1{margin-top:0}
-label{display:block;font-weight:600;margin-top:14px}
-input,textarea{width:100%;box-sizing:border-box;padding:11px;margin-top:6px;border:1px solid #cbd5e1;border-radius:8px;font:inherit}
-textarea{min-height:130px;resize:vertical}
-button{width:100%;padding:12px;margin-top:18px;border:0;border-radius:8px;background:#2563eb;color:white;font-size:1rem;cursor:pointer}
-button:disabled{opacity:.6;cursor:not-allowed}
-.status{display:none;margin-top:14px;padding:12px;border-radius:8px}
-.success{display:block;background:#ecfdf5;color:#065f46}
-.error{display:block;background:#fef2f2;color:#991b1b}
-.back{color:#2563eb;text-decoration:none}
+body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:900px;margin:25px auto;padding:0 18px;background:#f8fafc;color:#172033}
+a{color:#2563eb}.card{background:#fff;border:1px solid #dbe2ea;border-radius:14px;padding:24px;margin:14px 0}h1{margin-top:0}label{display:block;margin-top:14px;font-weight:600}input,textarea{width:100%;box-sizing:border-box;padding:11px;border:1px solid #cbd5e1;border-radius:8px;margin-top:6px;font:inherit}textarea{min-height:150px;resize:vertical}button{width:100%;border:0;border-radius:8px;padding:11px 14px;background:#2563eb;color:#fff;cursor:pointer;margin-top:18px;font:inherit}button:disabled{opacity:.6;cursor:not-allowed}.status{padding:11px;border-radius:9px;margin-top:12px;white-space:pre-wrap}.error{background:#fef2f2;color:#991b1b}.success{background:#ecfdf5;color:#065f46}.info{background:#f1f5f9;color:#475569}.meta{color:#64748b;font-size:.9rem;line-height:1.5}
 </style>
 </head>
 <body>
-
-<a class="back" href="homepage.html">← Back to homepage</a>
-
+<a href="homepage.html">← Back to homepage</a>
 <div class="card">
 <h1>File a New FIR</h1>
-<p>The submitted form is converted into an official FIR PDF, SHA-256 hashed, digitally signed, and stored under the new case.</p>
-
+<p class="meta">The submitted form is converted into an official FIR PDF, SHA-256 hashed, digitally signed, and stored under the new case.</p>
 <form id="fir-form">
 <label>Complainant Name</label>
 <input id="complainant_name" required>
-
 <label>Incident Type</label>
 <input id="incident_type" placeholder="e.g. Theft, Assault, Fraud" required>
-
 <label>Incident Date</label>
 <input id="incident_date" type="date" required>
-
 <label>Location</label>
 <input id="location" required>
-
 <label>Description</label>
 <textarea id="description" required></textarea>
-
 <button id="submit-btn" type="submit">File FIR</button>
 </form>
-
-<div id="status" class="status"></div>
+<div id="status"></div>
 </div>
-
 <script>
-const API = "https://alliance-cqnf.onrender.com";
-const token = sessionStorage.getItem("token");
-
-if (!token) {
-  window.location.href =
-    "login.html?redirect=" +
-    encodeURIComponent("file-fir.html");
+const API=(location.hostname==='localhost'||location.hostname==='127.0.0.1')?'http://127.0.0.1:8000':'https://alliance-cqnf.onrender.com';
+const token=sessionStorage.getItem('token');
+if(!token) location.href='login.html?redirect='+encodeURIComponent('file-fir.html');
+const form=document.getElementById('fir-form');
+const button=document.getElementById('submit-btn');
+const statusBox=document.getElementById('status');
+function showStatus(message,type){statusBox.className='status '+type;statusBox.textContent=message;}
+function requestId(){let id=sessionStorage.getItem('fir_create_request_id');if(!id){id=(crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random().toString(36).slice(2));sessionStorage.setItem('fir_create_request_id',id);}return id;}
+function clearRequestId(){sessionStorage.removeItem('fir_create_request_id');}
+async function fetchJson(path,options={},timeoutMs=90000){
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),timeoutMs);
+    try{
+        const response=await fetch(API+path,{...options,signal:controller.signal,headers:{...(options.headers||{}),Authorization:'Bearer '+token}});
+        const raw=await response.text();let data={};
+        try{data=raw?JSON.parse(raw):{};}catch{data={detail:raw};}
+        if(!response.ok){
+            let msg=data.detail;
+            if(Array.isArray(msg))msg=msg.map(x=>x.msg||JSON.stringify(x)).join('; ');
+            throw new Error(msg||('Request failed ('+response.status+')'));
+        }
+        return data;
+    }finally{clearTimeout(timer);}
 }
-
-const form = document.getElementById("fir-form");
-const button = document.getElementById("submit-btn");
-const statusBox = document.getElementById("status");
-
-function showStatus(message, ok) {
-  statusBox.textContent = message;
-  statusBox.className = "status " + (ok ? "success" : "error");
-}
-
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-
-  button.disabled = true;
-  button.textContent = "Creating official FIR…";
-  statusBox.className = "status";
-
-  const body = {
-    complainant_name:
-      document.getElementById("complainant_name").value.trim(),
-
-    incident_type:
-      document.getElementById("incident_type").value.trim(),
-
-    incident_date:
-      document.getElementById("incident_date").value,
-
-    location:
-      document.getElementById("location").value.trim(),
-
-    description:
-      document.getElementById("description").value.trim()
-  };
-
-  try {
-    const response = await fetch(`${API}/case/create`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`
-      },
-      body: JSON.stringify(body)
-    });
-
-    let data = {};
-    try {
-      data = await response.json();
-    } catch (_) {}
-
-    if (!response.ok) {
-      let message = data.detail;
-
-      if (Array.isArray(message)) {
-        message = message
-          .map(x => x.msg || JSON.stringify(x))
-          .join("; ");
-      }
-
-      if (typeof message === "object" && message !== null) {
-        message = JSON.stringify(message);
-      }
-
-      showStatus(
-        message || `Request failed (${response.status})`,
-        false
-      );
-
-      button.disabled = false;
-      button.textContent = "File FIR";
-      return;
+async function recoverCreate(id){
+    for(let i=0;i<15;i++){
+        try{
+            const d=await fetchJson('/case/create/recover?client_request_id='+encodeURIComponent(id),{},15000);
+            if(d.state==='completed')return d;
+            if(d.state==='processing')showStatus('The FIR was created and is still being finalized. Checking again…','info');
+        }catch(_){ }
+        await new Promise(r=>setTimeout(r,2000));
     }
-
-    showStatus(
-      `FIR ${data.fir_id || ""} filed successfully. Opening the case…`,
-      true
-    );
-
-    setTimeout(() => {
-      window.location.href =
-        `case-detail.html?case_id=${encodeURIComponent(data.case_id)}`;
-    }, 900);
-
-  } catch (error) {
-    showStatus(
-      "Could not reach the backend: " + error.message,
-      false
-    );
-
-    button.disabled = false;
-    button.textContent = "File FIR";
-  }
+    return null;
+}
+form.addEventListener('submit',async e=>{
+    e.preventDefault();
+    button.disabled=true;button.textContent='Creating official FIR…';showStatus('Submitting the FIR and securely creating the case…','info');
+    const id=requestId();
+    const body={
+        complainant_name:document.getElementById('complainant_name').value.trim(),
+        incident_type:document.getElementById('incident_type').value.trim(),
+        incident_date:document.getElementById('incident_date').value,
+        location:document.getElementById('location').value.trim(),
+        description:document.getElementById('description').value.trim(),
+        client_request_id:id
+    };
+    try{
+        const data=await fetchJson('/case/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)},90000);
+        clearRequestId();
+        showStatus('FIR '+(data.fir_id||'')+' filed successfully. Opening the case…','success');
+        setTimeout(()=>location.href='case-detail.html?case_id='+encodeURIComponent(data.case_id),800);
+    }catch(error){
+        showStatus('The connection was interrupted while filing the FIR. Checking whether the FIR was created…','info');
+        const recovered=await recoverCreate(id);
+        if(recovered){
+            clearRequestId();
+            showStatus('FIR '+(recovered.fir_id||'')+' was filed successfully. The previous response was lost, but the case is safe. Opening the case…','success');
+            setTimeout(()=>location.href='case-detail.html?case_id='+encodeURIComponent(recovered.case_id),800);
+        }else{
+            showStatus('Could not confirm FIR creation. No new FIR was confirmed. Please check My Cases before submitting again.\n\nTechnical detail: '+error.message,'error');
+            button.disabled=false;button.textContent='File FIR';
+        }
+    }
 });
 </script>
-
 </body>
 </html>

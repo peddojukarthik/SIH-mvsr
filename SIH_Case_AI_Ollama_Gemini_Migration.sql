@@ -205,13 +205,8 @@ USING public.cases c
 WHERE p.case_id = c.case_id
   AND lower(coalesce(c.status, '')) IN ('closed','completed','archived');
 
--- Existing FIR records generated as PDFs should be marked as pdf.
-UPDATE public.documents
-SET file_type = 'pdf'
-WHERE document_type = 'fir'
-  AND file_type <> 'pdf';
-
 -- 9. Keep documents.file_type aligned with the application.
+-- Drop the old constraint BEFORE updating existing FIR rows.
 -- Older schemas allowed only image/text; PDFs are now stored explicitly as pdf.
 ALTER TABLE public.documents DROP CONSTRAINT IF EXISTS documents_file_type_check;
 ALTER TABLE public.documents
@@ -227,3 +222,13 @@ WHERE document_type = 'fir' AND file_type <> 'pdf';
 UPDATE public.cases
 SET ai_model = 'gemma4:cloud', ai_provider = 'ollama+gemini-fallback'
 WHERE ai_enabled = true;
+
+-- 10. FIR creation idempotency.
+-- Prevents duplicate FIRs when the browser loses the POST response after
+-- the backend has already created the case and official FIR PDF.
+ALTER TABLE public.cases
+    ADD COLUMN IF NOT EXISTS client_request_id text;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cases_created_by_client_request
+    ON public.cases(created_by, client_request_id)
+    WHERE client_request_id IS NOT NULL;

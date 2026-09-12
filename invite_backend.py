@@ -6,7 +6,7 @@ Run:
     python -m uvicorn invite_backend:app --reload --port 8000
 
 This version keeps the existing session/TOTP/key/document model, but fixes:
-- FIR form -> official PDF FIR -> SHA-256 -> ECDSA-P256 signature -> Supabase Storage
+- FIR form -> official PDF FIR -> SHA-256 -> RSA-PSS-SHA256 signature -> Supabase Storage
 - useful error messages instead of "[object Object]"
 - case search returns metadata only; it never exposes files
 - case files are filtered by case_id + document permissions
@@ -924,6 +924,9 @@ class CreateCaseRequest(BaseModel):
     incident_date: str
     location: str
     description: str
+    # Client-generated idempotency key. This prevents a completed FIR from
+    # being duplicated when the browser loses the HTTP response.
+    client_request_id: str | None = None
 
 
 def make_fir_pdf(fir_id, u, req, filed_at):
@@ -1013,6 +1016,44 @@ def create_case(
             detail="Only police department members can file an FIR.",
         )
 
+    # A browser/network timeout can happen after the database and storage
+    # work has completed. Reusing the same client_request_id lets the browser
+    # safely recover the already-created FIR instead of creating a duplicate.
+    client_request_id = (req.client_request_id or "").strip() or None
+    if client_request_id:
+        try:
+            existing_case = (
+                supabase.table("cases")
+                .select("case_id,fir_id,status,created_by")
+                .eq("client_request_id", client_request_id)
+                .eq("created_by", current_user["user_id"])
+                .limit(1).execute()
+            )
+        except Exception:
+            existing_case = None
+        if existing_case and existing_case.data:
+            existing = existing_case.data[0]
+            if existing.get("fir_id"):
+                existing_doc = (
+                    supabase.table("documents")
+                    .select("document_id,current_version_id")
+                    .eq("case_id", existing["case_id"])
+                    .eq("document_type", "fir")
+                    .limit(1).execute()
+                )
+                doc = existing_doc.data[0] if existing_doc.data else {}
+                version_id = doc.get("current_version_id")
+                filename = f"FIR_{existing['fir_id']}.pdf"
+                return {
+                    "message": "FIR filed successfully.",
+                    "case_id": existing["case_id"],
+                    "fir_id": existing["fir_id"],
+                    "document_id": doc.get("document_id"),
+                    "version_id": version_id,
+                    "filename": filename,
+                    "recovered": True,
+                }
+
     # Generate the FIR reference.
     fir_id = generate_fir_number()
 
@@ -1028,6 +1069,7 @@ def create_case(
             "fir_id": fir_id,
             "status": "open",
             "created_by": current_user["user_id"],
+            "client_request_id": client_request_id,
             "ai_enabled": False,
             "ai_enabled_by": None,
             "ai_enabled_at": None,
@@ -1268,6 +1310,47 @@ def create_case(
         "storage_path": storage_path,
     }
 
+
+
+@app.get("/case/create/recover")
+def recover_case_create(client_request_id: str, authorization: str | None = Header(default=None)):
+    """Recover a FIR creation whose POST response was lost by the browser.
+
+    The frontend uses this only after a network-level failure. A case row may
+    exist while the FIR PDF is still being finalized, so return a small state
+    object instead of guessing that the operation failed.
+    """
+    u = get_current_user(authorization)
+    key = (client_request_id or "").strip()
+    if not key:
+        raise HTTPException(400, "client_request_id is required.")
+    try:
+        r = (supabase.table("cases")
+             .select("case_id,fir_id,status,created_by")
+             .eq("client_request_id", key)
+             .eq("created_by", u["user_id"])
+             .limit(1).execute())
+    except Exception as exc:
+        raise HTTPException(500, f"Could not recover FIR creation status: {error_text(exc)}")
+    if not r.data:
+        return {"state": "not_found"}
+    c = r.data[0]
+    d = (supabase.table("documents")
+         .select("document_id,current_version_id")
+         .eq("case_id", c["case_id"])
+         .eq("document_type", "fir")
+         .limit(1).execute())
+    doc = d.data[0] if d.data else None
+    if not c.get("fir_id") or not doc or not doc.get("current_version_id"):
+        return {"state": "processing", "case_id": c["case_id"], "fir_id": c.get("fir_id")}
+    return {
+        "state": "completed",
+        "case_id": c["case_id"],
+        "fir_id": c["fir_id"],
+        "document_id": doc.get("document_id"),
+        "version_id": doc.get("current_version_id"),
+        "filename": f"FIR_{c['fir_id']}.pdf",
+    }
 
 
 @app.get("/case/my")
