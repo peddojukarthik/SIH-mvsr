@@ -131,6 +131,22 @@ def db_call(operation, attempts=3, delay=0.6):
     raise last_exc
 
 
+def storage_download(path: str, attempts=3, delay=0.8):
+    """Download a protected object with short retries for transient storage disconnects."""
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            data = supabase.storage.from_(DOCUMENT_BUCKET).download(path)
+            if not data:
+                raise RuntimeError("Stored document is empty.")
+            return data
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts - 1:
+                time.sleep(delay * (attempt + 1))
+    raise last_exc
+
+
 def error_text(exc):
     """Convert Supabase/Python exceptions into readable text."""
     parts = []
@@ -1029,6 +1045,7 @@ def make_fir_pdf(fir_id, u, req, filed_at):
 @app.post("/case/create")
 def create_case(
     req: CreateCaseRequest,
+    background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
 ):
     current_user = get_current_user(authorization)
@@ -1093,9 +1110,11 @@ def create_case(
             "status": "open",
             "created_by": current_user["user_id"],
             "client_request_id": client_request_id,
-            "ai_enabled": False,
-            "ai_enabled_by": None,
-            "ai_enabled_at": None,
+            "ai_enabled": True,
+            "ai_enabled_by": current_user["user_id"],
+            "ai_enabled_at": filed_at,
+            "ai_provider": "ollama+gemini-fallback",
+            "ai_model": AI_OLLAMA_MODEL,
         })
         .execute()
     )
@@ -1319,6 +1338,18 @@ def create_case(
             detail="Could not set current FIR document version."
         )
 
+    # FIR extraction starts automatically. Native PDF text extraction is used
+    # when possible; scanned PDFs/images can fall back to the configured AI
+    # extraction providers. The original PDF remains immutable.
+    try:
+        queued = _queue_ai_job(version_id)
+        if queued:
+            background_tasks.add_task(_process_ai_job, version_id)
+    except Exception:
+        # The FIR itself is already safely stored and signed. A transient AI
+        # queue problem must not make FIR filing look like it failed.
+        pass
+
     return {
         "message": "FIR filed successfully.",
         "case_id": case_id,
@@ -1388,7 +1419,11 @@ def my_cases(authorization: str | None = Header(default=None)):
             )
             .eq("user_id", u["user_id"]).execute()
         )
-        return r.data or []
+        # Closed/completed/archived cases remain in the database for audit
+        # purposes, but must disappear from normal user-facing case lists.
+        rows = r.data or []
+        hidden = {"closed", "completed", "archived"}
+        return [x for x in rows if str((x.get("cases") or {}).get("status", "")).lower() not in hidden]
     except Exception as exc:
         raise HTTPException(500, f"Could not load cases: {error_text(exc)}")
 
@@ -1415,6 +1450,7 @@ def search_cases(
             .or_(f"fir_id.ilike.%{q}%,case_id.ilike.%{q}%")
             .limit(30).execute()
         )
+        hidden = {"closed", "completed", "archived"}
         return [
             {
                 "case_id": x["case_id"],
@@ -1423,6 +1459,7 @@ def search_cases(
                 "created_at": x.get("created_at"),
             }
             for x in (r.data or [])
+            if str(x.get("status", "")).lower() not in hidden
         ]
     except Exception as exc:
         raise HTTPException(500, f"Case search failed: {error_text(exc)}")
@@ -1436,6 +1473,9 @@ def membership(user_id, case_id):
     )
     if not r.data:
         raise HTTPException(403, "You are not a member of this case.")
+    case_state = db_call(lambda: supabase.table("cases").select("status").eq("case_id", case_id).limit(1).execute())
+    if case_state.data and str(case_state.data[0].get("status", "")).lower() in {"closed", "completed", "archived"}:
+        raise HTTPException(403, "This case is closed and is no longer available in the application.")
     row = r.data[0]
     if row.get("expires_at") and now() > parse_dt(row["expires_at"]):
         raise HTTPException(403, "Your access to this case has expired.")
@@ -1972,7 +2012,7 @@ def _process_ai_job(version_id: str):
               .select("storage_path").eq("version_id", version_id).limit(1).execute())
         if not vr.data:
             raise RuntimeError("Document version not found.")
-        data = supabase.storage.from_(DOCUMENT_BUCKET).download(vr.data[0]["storage_path"])
+        data = storage_download(vr.data[0]["storage_path"])
         filename = Path(vr.data[0]["storage_path"]).name
         estimate = estimate_document_seconds(data, filename)
         supabase.table("case_ai_documents").update({
@@ -2319,14 +2359,52 @@ def close_case(req: CloseCaseRequest, authorization: str | None = Header(default
     require_elevated(u, "closing this case", "MANAGE_MEMBERS")
     if not _is_case_head(u["user_id"], req.case_id):
         raise HTTPException(403, "Only the Case Head can close this case.")
+
     try:
-        r = supabase.table("cases").select("case_id,status").eq("case_id", req.case_id).limit(1).execute()
+        r = db_call(lambda: supabase.table("cases").select("case_id,status").eq("case_id", req.case_id).limit(1).execute())
         if not r.data:
             raise HTTPException(404, "Case not found.")
-        if str(r.data[0].get("status", "")).lower() in {"closed", "completed", "archived"}:
+
+        status = str(r.data[0].get("status", "")).lower()
+        if status in {"closed", "completed", "archived"}:
             return {"success": True, "message": "Case is already closed.", "status": r.data[0].get("status")}
-        supabase.table("cases").update({"status": "closed"}).eq("case_id", req.case_id).execute()
-        return {"success": True, "message": "Case closed. External participant accounts for this case are permanently deleted by the database cleanup trigger.", "status": "closed"}
+
+        # Keep the case, documents, hashes, signatures and audit history in
+        # the database. Only the application's active access is revoked.
+        participants = db_call(lambda: (supabase.table("external_case_participants")
+            .select("participant_id")
+            .eq("case_id", req.case_id).execute())).data or []
+        for p in participants:
+            pid = p.get("participant_id")
+            if not pid:
+                continue
+            # Existing external sessions become invalid immediately.
+            try:
+                supabase.table("external_sessions").delete().eq("participant_id", pid).execute()
+            except Exception:
+                pass
+            # Preserve the participant record for audit, but remove the
+            # credential and invitation token so it can never be reused.
+            try:
+                supabase.table("external_case_participants").update({
+                    "status": "revoked",
+                    "password_hash": None,
+                    "password_set_at": None,
+                    "invitation_token_hash": None,
+                }).eq("participant_id", pid).execute()
+            except Exception:
+                pass
+
+        db_call(lambda: supabase.table("cases").update({
+            "status": "closed"
+        }).eq("case_id", req.case_id).execute())
+
+        return {
+            "success": True,
+            "message": "Case closed. The case remains preserved in the database; it is hidden from the application and all external access has been revoked.",
+            "status": "closed",
+            "external_access_revoked": len(participants),
+        }
     except HTTPException:
         raise
     except Exception as exc:
