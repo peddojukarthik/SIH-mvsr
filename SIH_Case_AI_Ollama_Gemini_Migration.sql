@@ -210,3 +210,20 @@ UPDATE public.documents
 SET file_type = 'pdf'
 WHERE document_type = 'fir'
   AND file_type <> 'pdf';
+
+-- 9. Keep documents.file_type aligned with the application.
+-- Older schemas allowed only image/text; PDFs are now stored explicitly as pdf.
+ALTER TABLE public.documents DROP CONSTRAINT IF EXISTS documents_file_type_check;
+ALTER TABLE public.documents
+    ADD CONSTRAINT documents_file_type_check
+    CHECK (file_type IN ('image','pdf','text'));
+
+-- Existing FIR records are official PDF documents.
+UPDATE public.documents
+SET file_type = 'pdf'
+WHERE document_type = 'fir' AND file_type <> 'pdf';
+
+-- Keep already-enabled cases aligned with the currently configured production models.
+UPDATE public.cases
+SET ai_model = 'gemma4:cloud', ai_provider = 'ollama+gemini-fallback'
+WHERE ai_enabled = true;

@@ -80,8 +80,8 @@ MAX_FILE_SIZE = 50 * 1024 * 1024
 
 # --------------------------- CASE AI ---------------------------
 AI_OLLAMA_URL = os.getenv("OLLAMA_URL", "https://ollama.com")
-AI_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
-AI_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+AI_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:cloud")
+AI_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 AI_CHUNK_SIZE = int(os.getenv("AI_CHUNK_SIZE", "3500"))
 AI_TOP_K = int(os.getenv("AI_TOP_K", "10"))
 
@@ -1447,6 +1447,49 @@ def document_file(version_id: str, authorization: str | None = Header(default=No
     return {"url":url,"expires_in":120,"integrity":integrity}
 
 
+@app.get("/documents/preview/{version_id}")
+def document_preview(version_id: str, authorization: str | None = Header(default=None)):
+    """Return the authorized original bytes for the controlled in-app preview.
+
+    The frontend renders PDFs/images with PDF.js/canvas, so the browser's native
+    PDF toolbar (download/print) is never exposed. Access is still protected by
+    session elevation, case membership, and automatic integrity verification.
+    """
+    u = get_current_user(authorization)
+    require_elevated(u, "opening case files", "VIEW_FILES")
+    vr = supabase.table("document_versions").select("version_id,document_id,storage_path").eq("version_id", version_id).limit(1).execute()
+    if not vr.data:
+        raise HTTPException(404, "Document version not found.")
+    v = vr.data[0]
+    dr = supabase.table("documents").select("case_id,document_type").eq("document_id", v["document_id"]).limit(1).execute()
+    if not dr.data:
+        raise HTTPException(404, "Document not found.")
+    d = dr.data[0]
+    m = membership(u["user_id"], d["case_id"])
+    if d["document_type"] not in set(m.get("allowed_document_types") or []):
+        raise HTTPException(403, "You are not authorized to view this document.")
+    integrity = _verify_version_integrity_internal(version_id)
+    if not integrity.get("valid"):
+        raise HTTPException(409, integrity.get("message") or "Document integrity verification failed.")
+    try:
+        data = supabase.storage.from_(DOCUMENT_BUCKET).download(v["storage_path"])
+    except Exception as exc:
+        raise HTTPException(502, f"Could not load the secured original: {error_text(exc)}")
+    filename = Path(v["storage_path"]).name
+    ctype = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    safe_name = filename.replace('"', '')
+    return Response(
+        content=data,
+        media_type=ctype,
+        headers={
+            "Content-Disposition": f'inline; filename="{safe_name}"',
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "X-Document-Integrity": "verified",
+        },
+    )
+
+
 @app.get("/documents/verify/{version_id}")
 def verify_document(version_id: str, authorization: str | None = Header(default=None)):
     u = get_current_user(authorization)
@@ -1936,7 +1979,7 @@ def case_ai_status(case_id: str, authorization: str | None = Header(default=None
         "head_user_id": head_id,
         "head_name": head_name,
         "provider": c.get("ai_provider") or "ollama+gemini-fallback",
-        "model": c.get("ai_model") or AI_OLLAMA_MODEL,
+        "model": AI_OLLAMA_MODEL,
         "pending_count": len(pending),
         "jobs": jobs[:25],
     }

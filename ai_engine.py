@@ -21,9 +21,9 @@ from PIL import Image
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "https://ollama.com").rstrip("/")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip()
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:cloud")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 REQUEST_TIMEOUT = int(os.getenv("AI_REQUEST_TIMEOUT", "90"))
 CHAT_TIMEOUT = int(os.getenv("AI_CHAT_TIMEOUT", "45"))
 PDF_DPI = int(os.getenv("AI_PDF_DPI", "120"))
@@ -164,7 +164,7 @@ def _gemini_generate(prompt: str, data: bytes | None = None, mime_type: str | No
     parts: list[dict[str, Any]] = [{"text": prompt}]
     if data is not None and mime_type:
         parts.append({"inline_data": {"mime_type": mime_type, "data": base64.b64encode(data).decode("ascii")}})
-    payload = {"contents": [{"parts": parts}], "generationConfig": {"temperature": 0}}
+    payload = {"contents": [{"parts": parts}]}
     result = _post_json(
         f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}",
         payload,

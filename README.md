@@ -22,9 +22,9 @@ Deploy `invite_backend.py`, `ai_engine.py`, requirements, render.yaml and .pytho
 Required AI environment variables remain:
 - OLLAMA_API_KEY
 - OLLAMA_URL=https://ollama.com
-- OLLAMA_MODEL=gemma3:12b
+- OLLAMA_MODEL=gemma4:cloud
 - GEMINI_API_KEY
-- GEMINI_MODEL=gemini-2.5-flash
+- GEMINI_MODEL=gemini-3.8-flash
 - AI_REQUEST_TIMEOUT=90
 - AI_PDF_DPI=120
 - AI_CHUNK_SIZE=3500

@@ -8,9 +8,9 @@ services:
       - key: PYTHON_VERSION
         value: 3.12.9
       - key: OLLAMA_MODEL
-        value: gemma3:12b
+        value: gemma4:cloud
       - key: GEMINI_MODEL
-        value: gemini-2.5-flash
+        value: gemini-3.8-flash
       - key: AI_REQUEST_TIMEOUT
         value: "90"
       - key: AI_PDF_DPI
