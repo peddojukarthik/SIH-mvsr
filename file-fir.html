@@ -55,13 +55,15 @@ async function fetchJson(path,options={},timeoutMs=90000){
     }finally{clearTimeout(timer);}
 }
 async function recoverCreate(id){
-    for(let i=0;i<15;i++){
+    // The POST may finish on Render even if the browser loses its response.
+    // Poll the authoritative recovery endpoint before telling the user to retry.
+    for(let i=0;i<20;i++){
         try{
-            const d=await fetchJson('/case/create/recover?client_request_id='+encodeURIComponent(id),{},15000);
+            const d=await fetchJson('/case/create/recover?client_request_id='+encodeURIComponent(id),{},12000);
             if(d.state==='completed')return d;
-            if(d.state==='processing')showStatus('The FIR was created and is still being finalized. Checking again…','info');
+            if(d.state==='processing')showStatus('The FIR was created and is being finalized securely. Checking again…','info');
         }catch(_){ }
-        await new Promise(r=>setTimeout(r,2000));
+        await new Promise(r=>setTimeout(r,1500));
     }
     return null;
 }

@@ -1,0 +1,21 @@
+V8 PATCH - only changed code files
+
+1. invite_backend.py
+   - Fixes signing-key return handling compatibility.
+   - Retries transient Supabase session/database disconnects.
+   - Makes AI status resilient to transient activity-query failures.
+   - Rotates an explicitly non-RSA active signing key to RSA-PSS-SHA256.
+   - Corrects FIR signing description.
+
+2. document_crypto.py
+   - sign_file_hash now returns signature + key_id + algorithm, matching backend expectations.
+
+3. file-fir.html
+   - Keeps the FIR request id across a lost response and polls authoritative recovery longer.
+
+4. case-detail.html
+   - Retries transient GET failures.
+   - Shows non-fatal AI status warnings instead of turning a temporary activity-query failure into a blank/failed AI page.
+   - Makes retry status handling await the refresh correctly.
+
+No .env.example, README, SQL migration, or unchanged files are included.

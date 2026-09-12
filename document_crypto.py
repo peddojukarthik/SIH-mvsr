@@ -31,15 +31,19 @@ def decrypt_private_key(encrypted_value: str) -> bytes:
     if len(raw)<13: raise ValueError('Encrypted private key is invalid.')
     return AESGCM(_master_key()).decrypt(raw[:12],raw[12:],None)
 
-def sign_file_hash(user_id: str, file_hash: str, supabase=None) -> str:
+def sign_file_hash(user_id: str, file_hash: str, supabase=None) -> dict:
     if supabase is None: raise RuntimeError('sign_file_hash requires the Supabase client.')
-    result=supabase.table('user_keys').select('encrypted_private_key,key_status,algorithm').eq('user_id',user_id).eq('key_status','active').limit(1).execute()
+    result=supabase.table('user_keys').select('key_id,encrypted_private_key,key_status,algorithm').eq('user_id',user_id).eq('key_status','active').limit(1).execute()
     if not result.data: raise RuntimeError('No active signing key exists for this user.')
     encrypted_private_key=result.data[0].get('encrypted_private_key')
     if not encrypted_private_key: raise RuntimeError("The user's private key is not stored in user_keys.encrypted_private_key.")
     private_key=serialization.load_pem_private_key(decrypt_private_key(encrypted_private_key),password=None)
     signature=private_key.sign(file_hash.encode('utf-8'),padding.PSS(mgf=padding.MGF1(hashes.SHA256()),salt_length=padding.PSS.MAX_LENGTH),hashes.SHA256())
-    return base64.b64encode(signature).decode('ascii')
+    return {
+        'signature': base64.b64encode(signature).decode('ascii'),
+        'key_id': result.data[0]['key_id'],
+        'algorithm': result.data[0].get('algorithm') or 'RSA-PSS-SHA256',
+    }
 
 def verify_signature(public_key_pem: str,file_hash: str,signature_b64: str) -> bool:
     try:
