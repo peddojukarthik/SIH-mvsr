@@ -1,4 +1,75 @@
-<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>External Case Portal</title><style>body{font-family:system-ui;max-width:760px;margin:40px auto;padding:20px;background:#f8fafc;color:#172033}.card{background:white;border:1px solid #dbe2ea;border-radius:14px;padding:22px;margin:14px 0}input,select{width:100%;padding:10px;box-sizing:border-box;margin:7px 0 12px;border:1px solid #cbd5e1;border-radius:8px}button{background:#2563eb;color:white;border:0;border-radius:8px;padding:11px 16px;cursor:pointer}.meta{color:#64748b}.ok{background:#ecfdf5;color:#065f46;padding:10px;border-radius:8px}.err{background:#fef2f2;color:#991b1b;padding:10px;border-radius:8px}</style></head><body><div class="card"><h1>NEMESIS External Case Portal</h1><div id="info">Loading invitation…</div></div><div id="app"></div><script>
-const API="https://alliance-cqnf.onrender.com", token=new URLSearchParams(location.search).get('token');function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}async function api(p,o={}){let r=await fetch(API+p,{...o});let t=await r.text(),d={};try{d=t?JSON.parse(t):{}}catch{d={detail:t}}if(!r.ok)throw Error(d.detail||'Request failed');return d}
-async function init(){if(!token)throw Error('Invitation token is missing.');let d=await api('/external/invite?token='+encodeURIComponent(token));document.getElementById('info').innerHTML=`<b>${esc(d.name)}</b><div class="meta">${esc(d.organization_name||'External participant')} · ${esc(d.role)}</div><div class="meta">Case: ${esc(d.case_id)} · Access: ${esc(d.permission_level)}</div><div class="meta">Allowed: ${d.allowed_document_types.map(esc).join(', ')}</div>`;await api('/external/accept',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});document.getElementById('app').innerHTML=`<div class="card"><h2>Submit Case Document</h2><p class="meta">Uploads are immutable. If this document type already exists in the case, this upload becomes the next version.</p><label>Document Type</label><select id="type">${d.allowed_document_types.map(x=>`<option value="${esc(x)}">${esc(x.replaceAll('_',' '))}</option>`).join('')}</select><input id="file" type="file"><button id="upload">Upload</button><div id="status"></div></div>`;document.getElementById('upload').onclick=async()=>{let f=document.getElementById('file').files[0],st=document.getElementById('status');if(!f){st.className='err';st.textContent='Choose a file.';return}let fd=new FormData();fd.append('token',token);fd.append('document_type',document.getElementById('type').value);fd.append('file',f);try{let r=await api('/external/documents/upload',{method:'POST',body:fd});st.className='ok';st.textContent=r.message+' SHA-256: '+r.file_hash}catch(e){st.className='err';st.textContent=e.message}}}
-init().catch(e=>document.getElementById('info').innerHTML='<div class="err">'+esc(e.message)+'</div>');</script></body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Secure DMS — External Access</title>
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:980px;margin:30px auto;padding:0 18px;background:#f8fafc;color:#172033}
+.card{background:#fff;border:1px solid #dbe2ea;border-radius:14px;padding:22px;margin:14px 0;box-shadow:0 1px 3px #0000000b}
+h1,h2,h3{margin-top:0}input,select{width:100%;box-sizing:border-box;padding:11px;border:1px solid #cbd5e1;border-radius:8px;margin:6px 0 12px}button{border:0;border-radius:8px;padding:11px 15px;background:#2563eb;color:white;cursor:pointer;margin:4px 4px 4px 0}.green{background:#047857}.gray{background:#475569}.red{background:#b91c1c}.status{padding:11px;border-radius:8px;margin-top:10px;white-space:pre-wrap}.success{background:#ecfdf5;color:#065f46}.error{background:#fef2f2;color:#991b1b}.info{background:#eff6ff;color:#1e40af}.meta{color:#64748b;font-size:.9rem}.doc{padding:14px 0;border-bottom:1px solid #e5e7eb;display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.tag{display:inline-block;background:#eef2ff;padding:3px 7px;border-radius:6px;font-size:.8rem;margin-right:4px}.modal{display:none;position:fixed;inset:0;background:#0009;align-items:center;justify-content:center}.viewer{background:white;width:min(1100px,96vw);height:min(760px,92vh);border-radius:14px;padding:14px;display:flex;flex-direction:column}.viewer iframe{flex:1;border:1px solid #dbe2ea;border-radius:8px}.hidden{display:none}.requirements{font-size:.88rem;color:#64748b}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🔐 Secure DMS — External Access</h1>
+  <div id="message" class="status info">Checking invitation…</div>
+</div>
+
+<div id="setup" class="card hidden">
+  <h2>Create your password</h2>
+  <p id="inviteDetails"></p>
+  <label>Password</label><input id="password" type="password" autocomplete="new-password">
+  <label>Confirm password</label><input id="confirm" type="password" autocomplete="new-password">
+  <div class="requirements">At least 8 characters, including uppercase, lowercase and a number.</div>
+  <button class="green" id="createBtn">Create Password</button>
+  <div id="setupStatus"></div>
+</div>
+
+<div id="login" class="card hidden">
+  <h2>External Login</h2>
+  <p class="meta">Use the email address that received the case invitation.</p>
+  <label>Email</label><input id="email" type="email" autocomplete="username">
+  <label>Password</label><input id="loginPassword" type="password" autocomplete="current-password">
+  <button id="loginBtn">Sign In</button>
+  <div id="loginStatus"></div>
+</div>
+
+<div id="portal" class="hidden">
+  <div class="card">
+    <h2 id="welcome"></h2>
+    <div id="accessInfo" class="meta"></div>
+    <button class="gray" id="logoutBtn">Log out</button>
+  </div>
+  <div class="card">
+    <h2>Authorized Documents</h2>
+    <div id="documents"></div>
+  </div>
+</div>
+
+<div id="viewer" class="modal"><div class="viewer"><div style="display:flex;justify-content:space-between;align-items:center"><h2 id="viewerTitle">Document</h2><button class="gray" id="closeViewer">Close</button></div><iframe id="viewerFrame" title="Authorized document preview"></iframe></div></div>
+
+<script>
+const API=(location.hostname==='localhost'||location.hostname==='127.0.0.1')?'http://127.0.0.1:8000':'https://alliance-cqnf.onrender.com';
+const qs=new URLSearchParams(location.search);const inviteToken=qs.get('token');
+let session=sessionStorage.getItem('external_token')||'';let participant=null;
+const $=id=>document.getElementById(id);
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));}
+function show(id,on=true){$(id).classList.toggle('hidden',!on)}
+function err(data){if(typeof data?.detail==='string')return data.detail;if(data?.message)return data.message;return JSON.stringify(data)}
+async function api(path,opt={}){const headers={...(opt.headers||{})};if(session)headers.Authorization='Bearer '+session;let r;try{r=await fetch(API+path,{...opt,headers})}catch(e){throw new Error('Cannot reach Secure DMS server. Check that Render is running.')};const raw=await r.text();let d={};try{d=raw?JSON.parse(raw):{}}catch{d={detail:raw}}if(!r.ok)throw new Error(err(d));return d}
+function setMsg(text,cls='info'){const m=$('message');m.className='status '+cls;m.textContent=text}
+async function inspectInvite(){
+ if(!inviteToken){show('login');setMsg('Sign in to your external case account.','info');return}
+ try{const d=await api('/external/invite?token='+encodeURIComponent(inviteToken));$('inviteDetails').innerHTML='<b>'+esc(d.name)+'</b> · '+esc(d.organization_name||'')+'<br>Case: '+esc(d.case_id)+'<br>Access: '+esc(d.permission_level)+'<br>Documents: '+(d.allowed_document_types||[]).map(x=>'<span class="tag">'+esc(x.replaceAll('_',' '))+'</span>').join('');if(d.password_set){$('email').value=d.email||'';show('login');setMsg('This invitation is already activated. Sign in below.','info')}else{show('setup');setMsg('Invitation verified. Create your own password to activate your case account.','success');$('email').value=d.email||''}}catch(e){setMsg(e.message,'error');show('login');}}
+$('createBtn').onclick=async()=>{const p=$('password').value,c=$('confirm').value;if(p!==c){$('setupStatus').className='status error';$('setupStatus').textContent='Passwords do not match.';return}try{const d=await api('/external/accept',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:inviteToken,password:p})});$('setupStatus').className='status success';$('setupStatus').textContent=d.message;$('email').value=$('email').value||'';show('setup',false);show('login');setMsg('Password created. Sign in to continue.','success')}catch(e){$('setupStatus').className='status error';$('setupStatus').textContent=e.message}}
+$('loginBtn').onclick=async()=>{try{const d=await api('/external/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:$('email').value.trim(),password:$('loginPassword').value})});session=d.token;sessionStorage.setItem('external_token',session);participant=d.participant;history.replaceState({},'',location.pathname);await loadPortal()}catch(e){$('loginStatus').className='status error';$('loginStatus').textContent=e.message}}
+async function loadPortal(){try{participant=await api('/external/me');show('login',false);show('setup',false);show('portal');$('welcome').textContent='Welcome, '+participant.name;$('accessInfo').textContent=(participant.organization_name||'External participant')+' · '+participant.role+' · '+participant.permission_level+' access';await loadDocuments()}catch(e){session='';sessionStorage.removeItem('external_token');show('portal',false);show('login');$('loginStatus').className='status error';$('loginStatus').textContent=e.message}}
+async function loadDocuments(){const box=$('documents');box.innerHTML='<div class="status info">Loading authorized documents…</div>';try{const d=await api('/external/documents');if(!d.documents.length){box.innerHTML='<p class="meta">No authorized documents are currently available.</p>';return}box.innerHTML=d.documents.map(x=>'<div class="doc"><div><b>'+esc(x.filename)+'</b><div class="meta">'+esc(x.document_type)+' · Version '+esc(x.version_number)+'</div></div><button data-view="'+esc(x.version_id)+'" data-name="'+esc(x.filename)+'">View</button></div>').join('');box.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>viewDoc(b.dataset.view,b.dataset.name))}catch(e){box.innerHTML='<div class="status error">'+esc(e.message)+'</div>'}}
+async function viewDoc(id,name){try{const d=await api('/external/documents/file/'+encodeURIComponent(id));$('viewerTitle').textContent=name;$('viewerFrame').src=d.url;$('viewer').style.display='flex'}catch(e){alert(e.message)}}
+$('closeViewer').onclick=()=>{$('viewer').style.display='none';$('viewerFrame').src='about:blank'};
+$('logoutBtn').onclick=()=>{session='';participant=null;sessionStorage.removeItem('external_token');show('portal',false);show('login');setMsg('Logged out.','info')};
+(async()=>{if(session){await loadPortal()}else{await inspectInvite()}})();
+</script>
+</body>
+</html>

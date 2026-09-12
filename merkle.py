@@ -1,18 +1,16 @@
-"""Deterministic Merkle tree utilities for NEMESIS case integrity."""
 import hashlib
 
-def _leaf(hash_hex: str) -> str:
-    return hashlib.sha256(b"NEMESIS-LEAF:" + bytes.fromhex(hash_hex)).hexdigest()
 
-def _node(left: str, right: str) -> str:
-    return hashlib.sha256(b"NEMESIS-NODE:" + bytes.fromhex(left) + bytes.fromhex(right)).hexdigest()
-
-def calculate_merkle_root(file_hashes: list[str]) -> str:
-    if not file_hashes:
-        raise ValueError("Cannot create a Merkle root from an empty list.")
-    level = [_leaf(h) for h in file_hashes]
+def calculate_merkle_root(hashes):
+    """Return a deterministic SHA-256 Merkle root for a list of hex hashes."""
+    if not hashes:
+        return None
+    level = [bytes.fromhex(h) for h in hashes]
     while len(level) > 1:
-        if len(level) % 2:
-            level.append(level[-1])
-        level = [_node(level[i], level[i + 1]) for i in range(0, len(level), 2)]
-    return level[0]
+        nxt = []
+        for i in range(0, len(level), 2):
+            left = level[i]
+            right = level[i + 1] if i + 1 < len(level) else left
+            nxt.append(hashlib.sha256(left + right).digest())
+        level = nxt
+    return level[0].hex()

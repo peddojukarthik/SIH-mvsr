@@ -25,6 +25,7 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 REQUEST_TIMEOUT = int(os.getenv("AI_REQUEST_TIMEOUT", "90"))
+CHAT_TIMEOUT = int(os.getenv("AI_CHAT_TIMEOUT", "45"))
 PDF_DPI = int(os.getenv("AI_PDF_DPI", "120"))
 
 
@@ -137,7 +138,7 @@ def _ollama_vision(image_bytes: bytes, page_no: int) -> str:
     return text
 
 
-def _ollama_text(prompt: str) -> str:
+def _ollama_text(prompt: str, timeout: int = CHAT_TIMEOUT) -> str:
     if not OLLAMA_API_KEY:
         raise RuntimeError("OLLAMA_API_KEY is not configured.")
     result = _post_json(
@@ -149,6 +150,7 @@ def _ollama_text(prompt: str) -> str:
             "options": {"temperature": 0},
         },
         {"Authorization": f"Bearer {OLLAMA_API_KEY}"},
+        timeout=timeout,
     )
     text = (((result.get("message") or {}).get("content")) or "").strip()
     if not text:
@@ -156,7 +158,7 @@ def _ollama_text(prompt: str) -> str:
     return text
 
 
-def _gemini_generate(prompt: str, data: bytes | None = None, mime_type: str | None = None) -> str:
+def _gemini_generate(prompt: str, data: bytes | None = None, mime_type: str | None = None, timeout: int = REQUEST_TIMEOUT) -> str:
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
     parts: list[dict[str, Any]] = [{"text": prompt}]
@@ -167,6 +169,7 @@ def _gemini_generate(prompt: str, data: bytes | None = None, mime_type: str | No
         f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}",
         payload,
         {},
+        timeout=timeout,
     )
     candidates = result.get("candidates") or []
     if not candidates:
@@ -293,10 +296,16 @@ def extract_document(data: bytes, filename: str, progress_callback: Callable[[st
 
 
 def answer_question(prompt: str) -> dict:
+    """Answer with Ollama first, then Gemini fallback, with bounded time per provider."""
+    ollama_error = None
     try:
-        return {"text": _ollama_text(prompt), "provider": "ollama", "model": OLLAMA_MODEL, "fallback_used": False}
-    except Exception:
-        return {"text": _gemini_generate(prompt), "provider": "gemini", "model": GEMINI_MODEL, "fallback_used": True}
+        return {"text": _ollama_text(prompt, CHAT_TIMEOUT), "provider": "ollama", "model": OLLAMA_MODEL, "fallback_used": False}
+    except Exception as exc:
+        ollama_error = str(exc)
+    try:
+        return {"text": _gemini_generate(prompt, timeout=CHAT_TIMEOUT), "provider": "gemini", "model": GEMINI_MODEL, "fallback_used": True}
+    except Exception as exc:
+        raise RuntimeError(f"Ollama failed: {ollama_error}; Gemini fallback failed: {exc}") from exc
 
 
 def chunk_pages(pages: list[dict], chunk_size: int = 3500) -> list[dict]:

@@ -136,3 +136,77 @@ DROP TABLE IF EXISTS public.document_ocr CASCADE;
 
 -- IMPORTANT: this does NOT delete documents, document_versions, hashes,
 -- signatures, members, storage files, or case records.
+
+-- ============================================================
+-- 7. External participant self-service accounts
+-- External users are NOT internal users. Their account is the
+-- case-scoped external_case_participants row itself.
+-- ============================================================
+ALTER TABLE public.external_case_participants
+    ADD COLUMN IF NOT EXISTS password_hash text;
+ALTER TABLE public.external_case_participants
+    ADD COLUMN IF NOT EXISTS password_set_at timestamptz;
+ALTER TABLE public.external_case_participants
+    ADD COLUMN IF NOT EXISTS last_login_at timestamptz;
+
+CREATE TABLE IF NOT EXISTS public.external_sessions (
+    session_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    participant_id uuid NOT NULL REFERENCES public.external_case_participants(participant_id) ON DELETE CASCADE,
+    token_hash text NOT NULL UNIQUE,
+    expires_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_external_sessions_participant
+    ON public.external_sessions(participant_id);
+CREATE INDEX IF NOT EXISTS idx_external_sessions_expires
+    ON public.external_sessions(expires_at);
+
+-- Remove stale external sessions automatically.
+CREATE OR REPLACE FUNCTION public.cleanup_external_sessions()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    DELETE FROM public.external_sessions WHERE expires_at < now();
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_cleanup_external_sessions ON public.external_sessions;
+CREATE TRIGGER trg_cleanup_external_sessions
+AFTER INSERT ON public.external_sessions
+FOR EACH ROW EXECUTE FUNCTION public.cleanup_external_sessions();
+
+-- When a case is closed/completed/archived, delete the entire
+-- case-scoped external account. external_sessions disappear by CASCADE.
+CREATE OR REPLACE FUNCTION public.delete_external_accounts_on_case_close()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF lower(coalesce(NEW.status, '')) IN ('closed','completed','archived')
+       AND lower(coalesce(OLD.status, '')) NOT IN ('closed','completed','archived') THEN
+        DELETE FROM public.external_case_participants
+        WHERE case_id = NEW.case_id;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_delete_external_accounts_on_case_close ON public.cases;
+CREATE TRIGGER trg_delete_external_accounts_on_case_close
+AFTER UPDATE OF status ON public.cases
+FOR EACH ROW EXECUTE FUNCTION public.delete_external_accounts_on_case_close();
+
+-- Clean up any external accounts belonging to cases already closed.
+DELETE FROM public.external_case_participants p
+USING public.cases c
+WHERE p.case_id = c.case_id
+  AND lower(coalesce(c.status, '')) IN ('closed','completed','archived');
+
+-- Existing FIR records generated as PDFs should be marked as pdf.
+UPDATE public.documents
+SET file_type = 'pdf'
+WHERE document_type = 'fir'
+  AND file_type <> 'pdf';

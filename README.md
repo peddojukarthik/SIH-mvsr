@@ -40,3 +40,6 @@ Replace the deployed `case-detail.html` with the included version. It keeps the 
 - Chunk writes use batches with retries to reduce transient Supabase disconnect failures.
 - Failed jobs can be retried by the Case Head from AI Processing Activity.
 - Native digital documents explicitly show that cloud AI was not required.
+
+
+IMPORTANT RENDER ENV: Set FRONTEND_URL=https://allaince.netlify.app so external participant invitation links open the Netlify portal. BASE_URL may remain the Render backend URL for internal activation-page links.
