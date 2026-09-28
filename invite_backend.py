@@ -6,7 +6,7 @@ Run:
     python -m uvicorn invite_backend:app --reload --port 8000
 
 This version keeps the existing session/TOTP/key/document model, but fixes:
-- FIR form -> official PDF FIR -> SHA-256 -> RSA-PSS-SHA256 signature -> Supabase Storage
+- FIR form -> official PDF FIR -> SHA-256 -> ECDSA-P256 signature -> Supabase Storage
 - useful error messages instead of "[object Object]"
 - case search returns metadata only; it never exposes files
 - case files are filtered by case_id + document permissions
@@ -16,14 +16,14 @@ This version keeps the existing session/TOTP/key/document model, but fixes:
 - no separate invite page is required
 """
 
-import os, secrets, hashlib, mimetypes, uuid, json, time, threading, urllib.request, urllib.error
+import os, secrets, hashlib, mimetypes, uuid, json, urllib.request, urllib.error
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
 import pyotp
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Form, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
@@ -41,17 +41,13 @@ from document_crypto import (
 from merkle import calculate_merkle_root
 
 load_dotenv()
+if not os.getenv("SUPABASE_URL") and Path("allaince.env").exists():
+    load_dotenv("allaince.env", override=False)
 
 app = FastAPI(title="SIH Secure DMS")
-ALLOWED_ORIGINS = [
-    "https://allaince.netlify.app",
-    "http://localhost:5500",
-    "http://127.0.0.1:5500",
-]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=False,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -70,20 +66,15 @@ RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "onboarding@resend.dev")
 # Email links must point to a real HTTP page.
 # For local development this is the backend's activate-page.
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "https://allaince.netlify.app")
+FRONTEND_URL = os.getenv("FRONTEND_URL", BASE_URL)
 
 SESSION_LIFETIME_HOURS = 8
 ELEVATION_LIFETIME_MINUTES = 15
 EMAIL_OTP_MINUTES = 5
+PASSWORD_RESET_MINUTES = 10
+PASSWORD_RESET_MAX_ATTEMPTS = 5
 DOCUMENT_BUCKET = os.getenv("DOCUMENT_BUCKET", "documents")
 MAX_FILE_SIZE = 50 * 1024 * 1024
-
-# --------------------------- CASE AI ---------------------------
-AI_OLLAMA_URL = os.getenv("OLLAMA_URL", "https://ollama.com")
-AI_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:cloud")
-AI_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-AI_CHUNK_SIZE = int(os.getenv("AI_CHUNK_SIZE", "3500"))
-AI_TOP_K = int(os.getenv("AI_TOP_K", "10"))
 
 ALLOWED_EXTENSIONS = {
     ".pdf", ".png", ".jpg", ".jpeg", ".doc", ".docx",
@@ -113,40 +104,6 @@ def iso(dt):
     return dt.isoformat()
 
 
-def db_call(operation, attempts=3, delay=0.6):
-    """Retry short Supabase reads/writes when a pooled HTTP connection is stale.
-
-    Render can occasionally report "Server disconnected" for a reused
-    connection. Retrying the same idempotent operation avoids turning a
-    transient database transport error into a user-visible 500.
-    """
-    last_exc = None
-    for attempt in range(attempts):
-        try:
-            return operation()
-        except Exception as exc:
-            last_exc = exc
-            if attempt < attempts - 1:
-                time.sleep(delay * (attempt + 1))
-    raise last_exc
-
-
-def storage_download(path: str, attempts=3, delay=0.8):
-    """Download a protected object with short retries for transient storage disconnects."""
-    last_exc = None
-    for attempt in range(attempts):
-        try:
-            data = supabase.storage.from_(DOCUMENT_BUCKET).download(path)
-            if not data:
-                raise RuntimeError("Stored document is empty.")
-            return data
-        except Exception as exc:
-            last_exc = exc
-            if attempt < attempts - 1:
-                time.sleep(delay * (attempt + 1))
-    raise last_exc
-
-
 def error_text(exc):
     """Convert Supabase/Python exceptions into readable text."""
     parts = []
@@ -173,12 +130,12 @@ def get_current_user(authorization: str | None):
     token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
 
     try:
-        sr = db_call(lambda: (
+        sr = (
             supabase.table("sessions")
             .select("session_id,user_id,expires_at,elevated_until,elevated_purpose")
             .eq("token_hash", token_hash)
             .limit(1).execute()
-        ))
+        )
     except Exception as exc:
         raise HTTPException(500, f"Session lookup failed: {error_text(exc)}")
 
@@ -190,7 +147,7 @@ def get_current_user(authorization: str | None):
         raise HTTPException(401, "Session expired. Please log in again.")
 
     try:
-        ur = db_call(lambda: (
+        ur = (
             supabase.table("users")
             .select(
                 "user_id,employee_id,account_status,totp_secret,"
@@ -199,7 +156,7 @@ def get_current_user(authorization: str | None):
             )
             .eq("user_id", session["user_id"])
             .limit(1).execute()
-        ))
+        )
     except Exception as exc:
         raise HTTPException(500, f"User lookup failed: {error_text(exc)}")
 
@@ -240,7 +197,6 @@ def get_current_user(authorization: str | None):
             admin.data and admin.data[0].get("can_invite_employees")
         ),
         "can_delegate": bool(admin.data and admin.data[0].get("can_delegate")),
-        "is_department_head": bool(get_department_head_user_id(registry.get("department_id")) == user["user_id"]),
         "has_2fa": bool(user.get("totp_secret")),
         "is_elevated": elevated,
         "elevated_purpose": session.get("elevated_purpose"),
@@ -252,10 +208,7 @@ def require_elevated(u, action, purpose=None):
     if not u.get("is_elevated"):
         raise HTTPException(403, f"Email OTP verification is required for {action}.")
     if purpose and u.get("elevated_purpose") != purpose:
-        # Upload verification also authorizes the immediate file-list refresh
-        # after a successful upload; all other purposes remain exact.
-        if not (purpose == "VIEW_FILES" and u.get("elevated_purpose") == "UPLOAD_FILE"):
-            raise HTTPException(403, f"A fresh email OTP is required for {action}.")
+        raise HTTPException(403, f"A fresh email OTP is required for {action}.")
 
 
 @app.get("/health")
@@ -281,14 +234,9 @@ def ensure_user_key(user_id, supabase):
 
     active_key = result.data[0] if result.data else None
 
-    # Existing RSA active key is usable. If an older ECDSA key is still marked
-    # active, rotate it now so FIR/file signing always uses RSA-PSS-SHA256.
+    # Existing active key is usable
     if active_key and active_key.get("encrypted_private_key"):
-        algorithm = (active_key.get("algorithm") or "").upper()
-        if algorithm in {"", "RSA-PSS-SHA256", "RSA-PSS/SHA-256"} or "RSA" in algorithm:
-            return active_key
-        supabase.table("user_keys").update({"key_status": "rotated"}).eq("key_id", active_key["key_id"]).execute()
-        active_key = None
+        return active_key
 
     # Active key exists but private key is missing.
     # Rotate it instead of throwing an error.
@@ -302,12 +250,9 @@ def ensure_user_key(user_id, supabase):
     # Generate a completely new signing key
     private_key_pem, public_key_pem = generate_user_key_pair()
 
-    encrypted_private_key = encrypt_private_key(private_key_pem)
-    # Normalize crypto byte strings before passing them to Supabase JSON.
-    if isinstance(encrypted_private_key, (bytes, bytearray)):
-        encrypted_private_key = encrypted_private_key.decode("utf-8")
-    if isinstance(public_key_pem, (bytes, bytearray)):
-        public_key_pem = public_key_pem.decode("utf-8")
+    encrypted_private_key = encrypt_private_key(
+        private_key_pem
+    )
 
     new_key = (
         supabase.table("user_keys")
@@ -399,7 +344,6 @@ def login(req: dict):
         "department_type": dept["type"],
         "department_name": dept["name"],
         "is_admin": bool(admin.data),
-        "is_department_head": bool(get_department_head_user_id(registry.get("department_id")) == user["user_id"]),
         "has_2fa": bool(user.get("totp_secret")),
     }
 
@@ -772,27 +716,6 @@ def invite(req: InviteRequest, authorization: str | None = Header(default=None))
         raise HTTPException(500, f"Invitation failed: {error_text(exc)}")
 
 
-def send_external_invite_email(to_email: str, full_name: str, invitation_link: str, purpose: str):
-    text = (
-        f"Hello {full_name},\n\n"
-        "You have been granted case-specific access to Secure DMS as an external participant.\n\n"
-        f"Purpose: {purpose or 'Case collaboration'}\n\n"
-        "Open the invitation link to create your own password. You will then sign in using your email address and the password you created.\n\n"
-        f"Invitation link (valid for the configured access period):\n{invitation_link}\n\n"
-        "Your account is limited to this case and the document types authorized by the Case Head. "
-        "External access is automatically removed when the case is closed or your access expires."
-    )
-    html = (
-        f"<p>Hello {full_name},</p>"
-        "<p>You have been granted <strong>case-specific external access</strong> to Secure DMS.</p>"
-        f"<p><strong>Purpose:</strong> {purpose or 'Case collaboration'}</p>"
-        "<p>Open the invitation below to create your own password. After that, sign in using your email and the password you created.</p>"
-        f'<p><a href="{invitation_link}">Open Secure DMS invitation</a></p>'
-        "<p>Your account is limited to this case and authorized document types. External access is automatically removed when the case is closed or your access expires.</p>"
-    )
-    return _resend_send(to_email, "Secure DMS case access invitation", text, html)
-
-
 def send_email(to_email: str, full_name: str, activation_link: str):
     text = (
         f"Hi {full_name},\n\n"
@@ -814,6 +737,179 @@ def send_email(to_email: str, full_name: str, activation_link: str):
         text,
         html,
     )
+
+
+
+# --------------------------- PASSWORD RESET ---------------------------
+
+class PasswordResetRequest(BaseModel):
+    employee_id: str
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    employee_id: str
+    code: str
+    new_password: str
+
+
+def _password_reset_lookup(employee_id: str):
+    """Return the account + official email needed for a password reset."""
+    result = (
+        supabase.table("users")
+        .select(
+            "user_id,employee_id,account_status,"
+            "employee_registry!fk_users_employee(full_name,official_email)"
+        )
+        .eq("employee_id", employee_id)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+def _send_password_reset_email(to_email: str, full_name: str, code: str):
+    text = (
+        f"Hello {full_name},\n\n"
+        f"Your Secure DMS password reset code is: {code}\n"
+        f"It expires in {PASSWORD_RESET_MINUTES} minutes.\n\n"
+        "If you did not request a password reset, ignore this email."
+    )
+    html = (
+        f"<p>Hello {full_name},</p>"
+        "<p>A password reset was requested for your Secure DMS account.</p>"
+        f"<p>Your verification code is <strong>{code}</strong>.</p>"
+        f"<p>This code expires in {PASSWORD_RESET_MINUTES} minutes.</p>"
+        "<p>If you did not request this reset, you can ignore this email.</p>"
+    )
+    return _resend_send(
+        to_email,
+        "Secure DMS password reset code",
+        text,
+        html,
+    )
+
+
+@app.post("/password-reset/request")
+def request_password_reset(req: PasswordResetRequest):
+    employee_id = req.employee_id.strip()
+    if not employee_id:
+        raise HTTPException(400, "Employee ID is required.")
+
+    # Do not reveal whether an employee/account exists.
+    generic = {
+        "message": "If the account exists and has an official email address, a verification code has been sent."
+    }
+
+    try:
+        user = _password_reset_lookup(employee_id)
+        if not user or user.get("account_status") not in ("activated", "profile_pending", "active"):
+            return generic
+
+        registry = user.get("employee_registry") or {}
+        email = registry.get("official_email")
+        name = registry.get("full_name") or "User"
+        if not email:
+            return generic
+
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        code_hash = hashlib.sha256(code.encode()).hexdigest()
+        expires_at = iso(now() + timedelta(minutes=PASSWORD_RESET_MINUTES))
+
+        # Invalidate previous unused reset codes for this user.
+        supabase.table("password_reset_tokens").update({
+            "status": "revoked"
+        }).eq("user_id", user["user_id"]).eq("status", "pending").execute()
+
+        supabase.table("password_reset_tokens").insert({
+            "user_id": user["user_id"],
+            "token_hash": code_hash,
+            "expires_at": expires_at,
+            "status": "pending",
+            "attempts": 0,
+        }).execute()
+
+        _send_password_reset_email(email, name, code)
+        return generic
+    except Exception as exc:
+        # Do not expose whether an email/account exists or leak provider details.
+        # Log only on the server if application logging is configured.
+        raise HTTPException(500, "Could not start password reset. Please try again.") from exc
+
+
+@app.post("/password-reset/confirm")
+def confirm_password_reset(req: PasswordResetConfirmRequest):
+    employee_id = req.employee_id.strip()
+    code = req.code.strip()
+    new_password = req.new_password
+
+    if not employee_id or not code or not new_password:
+        raise HTTPException(400, "Employee ID, verification code, and new password are required.")
+    if len(code) != 6 or not code.isdigit():
+        raise HTTPException(400, "Verification code must be 6 digits.")
+    if len(new_password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters.")
+
+    try:
+        user = _password_reset_lookup(employee_id)
+        if not user:
+            raise HTTPException(400, "Invalid or expired verification code.")
+
+        reset_result = (
+            supabase.table("password_reset_tokens")
+            .select("reset_id,user_id,token_hash,expires_at,status,attempts")
+            .eq("user_id", user["user_id"])
+            .eq("status", "pending")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not reset_result.data:
+            raise HTTPException(400, "Invalid or expired verification code.")
+
+        row = reset_result.data[0]
+        if now() > parse_dt(row["expires_at"]):
+            supabase.table("password_reset_tokens").update({"status": "expired"}).eq(
+                "reset_id", row["reset_id"]
+            ).execute()
+            raise HTTPException(400, "Invalid or expired verification code.")
+
+        attempts = int(row.get("attempts") or 0)
+        if attempts >= PASSWORD_RESET_MAX_ATTEMPTS:
+            supabase.table("password_reset_tokens").update({"status": "locked"}).eq(
+                "reset_id", row["reset_id"]
+            ).execute()
+            raise HTTPException(400, "Too many incorrect attempts. Request a new code.")
+
+        supplied_hash = hashlib.sha256(code.encode()).hexdigest()
+        if not secrets.compare_digest(supplied_hash, row["token_hash"]):
+            new_attempts = attempts + 1
+            update = {"attempts": new_attempts}
+            if new_attempts >= PASSWORD_RESET_MAX_ATTEMPTS:
+                update["status"] = "locked"
+            supabase.table("password_reset_tokens").update(update).eq(
+                "reset_id", row["reset_id"]
+            ).execute()
+            raise HTTPException(400, "Invalid or expired verification code.")
+
+        password_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+        supabase.table("users").update({
+            "password_hash": password_hash,
+            "account_status": user.get("account_status") or "active",
+            "must_change_password": False,
+        }).eq("user_id", user["user_id"]).execute()
+
+        supabase.table("password_reset_tokens").update({
+            "status": "used"
+        }).eq("reset_id", row["reset_id"]).execute()
+
+        # A password reset invalidates every existing web session.
+        supabase.table("sessions").delete().eq("user_id", user["user_id"]).execute()
+
+        return {"message": "Password reset successfully. You can now log in."}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, "Could not reset the password. Please try again.") from exc
 
 
 # --------------------------- ACTIVATION / PROFILE ---------------------------
@@ -904,55 +1000,6 @@ def complete_profile(
 
 # --------------------------- CASES ---------------------------
 
-def get_department_head_user_id(department_id: str):
-    """Resolve the explicit Department Head user for a department."""
-    if not department_id:
-        return None
-    try:
-        r=(supabase.table("employee_registry")
-           .select("employee_id,rank,designation")
-           .eq("department_id",department_id)
-           .or_("rank.ilike.%Department Head%,designation.ilike.%Department Head%")
-           .limit(10).execute())
-        ids=[x.get("employee_id") for x in (r.data or []) if x.get("employee_id")]
-        if ids:
-            ur=(supabase.table("users").select("user_id,employee_id")
-                .in_("employee_id",ids).limit(10).execute())
-            for row in (ur.data or []):
-                if row.get("employee_id") in ids:
-                    return row.get("user_id")
-    except Exception:
-        pass
-    try:
-        r=(supabase.table("department_admins").select("user_id")
-           .eq("department_id",department_id).eq("can_delegate",True)
-           .limit(1).execute())
-        if r.data:
-            return r.data[0].get("user_id")
-    except Exception:
-        pass
-    return None
-
-def repair_case_head(case_id: str):
-    r=(supabase.table("cases").select("case_id,head_user_id,created_by")
-       .eq("case_id",case_id).limit(1).execute())
-    if not r.data:
-        raise HTTPException(404,"Case not found.")
-    c=r.data[0]
-    department_id=None
-    try:
-        ur=(supabase.table("users")
-            .select("user_id,employee_registry!fk_users_employee(department_id)")
-            .eq("user_id",c.get("created_by")).limit(1).execute())
-        if ur.data:
-            department_id=(ur.data[0].get("employee_registry") or {}).get("department_id")
-    except Exception:
-        pass
-    head_id=get_department_head_user_id(department_id) or c.get("head_user_id") or c.get("created_by")
-    if head_id and head_id != c.get("head_user_id"):
-        supabase.table("cases").update({"head_user_id":head_id}).eq("case_id",case_id).execute()
-    return head_id,department_id
-
 def generate_fir_number():
     return f"FIR-{now().strftime('%Y%m%d')}-{secrets.token_hex(2).upper()}"
 
@@ -963,9 +1010,6 @@ class CreateCaseRequest(BaseModel):
     incident_date: str
     location: str
     description: str
-    # Client-generated idempotency key. This prevents a completed FIR from
-    # being duplicated when the browser loses the HTTP response.
-    client_request_id: str | None = None
 
 
 def make_fir_pdf(fir_id, u, req, filed_at):
@@ -1032,7 +1076,7 @@ def make_fir_pdf(fir_id, u, req, filed_at):
         p(
             "This FIR was generated by Secure DMS from the submitted form. "
             "The final PDF bytes are SHA-256 hashed and digitally signed "
-            "with the filing user's RSA-3072 private key using RSA-PSS/SHA-256."
+            "with the filing user's ECDSA-P256 private key."
         ),
         Spacer(1, 30),
         p(f"<b>Digital Signatory:</b> {u['full_name']} ({u['employee_id']})"),
@@ -1045,7 +1089,6 @@ def make_fir_pdf(fir_id, u, req, filed_at):
 @app.post("/case/create")
 def create_case(
     req: CreateCaseRequest,
-    background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
 ):
     current_user = get_current_user(authorization)
@@ -1056,46 +1099,10 @@ def create_case(
             detail="Only police department members can file an FIR.",
         )
 
-    # A browser/network timeout can happen after the database and storage
-    # work has completed. Reusing the same client_request_id lets the browser
-    # safely recover the already-created FIR instead of creating a duplicate.
-    client_request_id = (req.client_request_id or "").strip() or None
-    if client_request_id:
-        try:
-            existing_case = (
-                supabase.table("cases")
-                .select("case_id,fir_id,status,created_by")
-                .eq("client_request_id", client_request_id)
-                .eq("created_by", current_user["user_id"])
-                .limit(1).execute()
-            )
-        except Exception:
-            existing_case = None
-        if existing_case and existing_case.data:
-            existing = existing_case.data[0]
-            if existing.get("fir_id"):
-                existing_doc = (
-                    supabase.table("documents")
-                    .select("document_id,current_version_id")
-                    .eq("case_id", existing["case_id"])
-                    .eq("document_type", "fir")
-                    .limit(1).execute()
-                )
-                doc = existing_doc.data[0] if existing_doc.data else {}
-                version_id = doc.get("current_version_id")
-                filename = f"FIR_{existing['fir_id']}.pdf"
-                return {
-                    "message": "FIR filed successfully.",
-                    "case_id": existing["case_id"],
-                    "fir_id": existing["fir_id"],
-                    "document_id": doc.get("document_id"),
-                    "version_id": version_id,
-                    "filename": filename,
-                    "recovered": True,
-                }
-
     # Generate the FIR reference.
-    fir_id = generate_fir_number()
+    fir_id = generate_fir_number(
+        current_user["department_type"]
+    )
 
     filed_at = datetime.now(timezone.utc).isoformat()
 
@@ -1109,12 +1116,6 @@ def create_case(
             "fir_id": fir_id,
             "status": "open",
             "created_by": current_user["user_id"],
-            "client_request_id": client_request_id,
-            "ai_enabled": True,
-            "ai_enabled_by": current_user["user_id"],
-            "ai_enabled_at": filed_at,
-            "ai_provider": "ollama+gemini-fallback",
-            "ai_model": AI_OLLAMA_MODEL,
         })
         .execute()
     )
@@ -1126,16 +1127,6 @@ def create_case(
         )
 
     case_id = case_result.data[0]["case_id"]
-
-    # The explicit Department Head is a default member of every case.
-    # Registry rank/designation is the primary source of truth.
-    head_user_id = get_department_head_user_id(current_user.get("department_id"))
-    if not head_user_id:
-        head_user_id = current_user["user_id"]
-    try:
-        supabase.table("cases").update({"head_user_id": head_user_id}).eq("case_id", case_id).execute()
-    except Exception as exc:
-        raise HTTPException(500, f"Could not assign case Head: {error_text(exc)}")
 
     # ------------------------------------------------------------
     # Give the FIR creator full case-management permission.
@@ -1170,22 +1161,6 @@ def create_case(
             status_code=500,
             detail="Could not create case membership."
         )
-
-    if head_user_id != current_user["user_id"]:
-        try:
-            supabase.table("case_membership").insert({
-                "user_id": head_user_id,
-                "case_id": case_id,
-                "permission_level": "grant",
-                "granted_by": current_user["user_id"],
-                "allowed_document_types": [
-                    "fir", "evidence", "witness_statement", "suspect_interview",
-                    "forensic_report", "postmortem_report", "medical_report",
-                    "charge_sheet", "court_order", "judgment", "cctv", "other",
-                ],
-            }).execute()
-        except Exception:
-            pass
 
     # ------------------------------------------------------------
     # Create the ACTUAL official FIR PDF.
@@ -1227,7 +1202,7 @@ def create_case(
         .insert({
             "case_id": case_id,
             "document_type": "fir",
-            "file_type": "pdf",
+            "file_type": "text",
             "uploader_id": current_user["user_id"],
         })
         .execute()
@@ -1338,18 +1313,6 @@ def create_case(
             detail="Could not set current FIR document version."
         )
 
-    # FIR extraction starts automatically. Native PDF text extraction is used
-    # when possible; scanned PDFs/images can fall back to the configured AI
-    # extraction providers. The original PDF remains immutable.
-    try:
-        queued = _queue_ai_job(version_id)
-        if queued:
-            background_tasks.add_task(_process_ai_job, version_id)
-    except Exception:
-        # The FIR itself is already safely stored and signed. A transient AI
-        # queue problem must not make FIR filing look like it failed.
-        pass
-
     return {
         "message": "FIR filed successfully.",
         "case_id": case_id,
@@ -1366,47 +1329,6 @@ def create_case(
 
 
 
-@app.get("/case/create/recover")
-def recover_case_create(client_request_id: str, authorization: str | None = Header(default=None)):
-    """Recover a FIR creation whose POST response was lost by the browser.
-
-    The frontend uses this only after a network-level failure. A case row may
-    exist while the FIR PDF is still being finalized, so return a small state
-    object instead of guessing that the operation failed.
-    """
-    u = get_current_user(authorization)
-    key = (client_request_id or "").strip()
-    if not key:
-        raise HTTPException(400, "client_request_id is required.")
-    try:
-        r = db_call(lambda: (supabase.table("cases")
-             .select("case_id,fir_id,status,created_by")
-             .eq("client_request_id", key)
-             .eq("created_by", u["user_id"])
-             .limit(1).execute()))
-    except Exception as exc:
-        raise HTTPException(500, f"Could not recover FIR creation status: {error_text(exc)}")
-    if not r.data:
-        return {"state": "not_found"}
-    c = r.data[0]
-    d = db_call(lambda: (supabase.table("documents")
-         .select("document_id,current_version_id")
-         .eq("case_id", c["case_id"])
-         .eq("document_type", "fir")
-         .limit(1).execute()))
-    doc = d.data[0] if d.data else None
-    if not c.get("fir_id") or not doc or not doc.get("current_version_id"):
-        return {"state": "processing", "case_id": c["case_id"], "fir_id": c.get("fir_id")}
-    return {
-        "state": "completed",
-        "case_id": c["case_id"],
-        "fir_id": c["fir_id"],
-        "document_id": doc.get("document_id"),
-        "version_id": doc.get("current_version_id"),
-        "filename": f"FIR_{c['fir_id']}.pdf",
-    }
-
-
 @app.get("/case/my")
 def my_cases(authorization: str | None = Header(default=None)):
     u = get_current_user(authorization)
@@ -1419,11 +1341,7 @@ def my_cases(authorization: str | None = Header(default=None)):
             )
             .eq("user_id", u["user_id"]).execute()
         )
-        # Closed/completed/archived cases remain in the database for audit
-        # purposes, but must disappear from normal user-facing case lists.
-        rows = r.data or []
-        hidden = {"closed", "completed", "archived"}
-        return [x for x in rows if str((x.get("cases") or {}).get("status", "")).lower() not in hidden]
+        return r.data or []
     except Exception as exc:
         raise HTTPException(500, f"Could not load cases: {error_text(exc)}")
 
@@ -1450,7 +1368,6 @@ def search_cases(
             .or_(f"fir_id.ilike.%{q}%,case_id.ilike.%{q}%")
             .limit(30).execute()
         )
-        hidden = {"closed", "completed", "archived"}
         return [
             {
                 "case_id": x["case_id"],
@@ -1459,7 +1376,6 @@ def search_cases(
                 "created_at": x.get("created_at"),
             }
             for x in (r.data or [])
-            if str(x.get("status", "")).lower() not in hidden
         ]
     except Exception as exc:
         raise HTTPException(500, f"Case search failed: {error_text(exc)}")
@@ -1473,88 +1389,52 @@ def membership(user_id, case_id):
     )
     if not r.data:
         raise HTTPException(403, "You are not a member of this case.")
-    case_state = db_call(lambda: supabase.table("cases").select("status").eq("case_id", case_id).limit(1).execute())
-    if case_state.data and str(case_state.data[0].get("status", "")).lower() in {"closed", "completed", "archived"}:
-        raise HTTPException(403, "This case is closed and is no longer available in the application.")
     row = r.data[0]
     if row.get("expires_at") and now() > parse_dt(row["expires_at"]):
         raise HTTPException(403, "Your access to this case has expired.")
     return row
 
 
-def _verify_version_integrity_internal(version_id: str) -> dict:
-    try:
-        vr = (supabase.table("document_versions")
-              .select("version_id,document_id,storage_path,file_hash,signature,uploader_id,version_number,previous_version_hash,signing_key_id")
-              .eq("version_id", version_id).limit(1).execute())
-        if not vr.data:
-            return {"valid": False, "hash_valid": False, "signature_valid": None, "chain_valid": False, "message": "Document version not found."}
-        v = vr.data[0]
-        stored = supabase.storage.from_(DOCUMENT_BUCKET).download(v["storage_path"])
-        actual_hash = hashlib.sha256(stored).hexdigest()
-        hash_valid = secrets.compare_digest(actual_hash, v["file_hash"])
-        signature_valid = None
-        if v.get("signature") == "EXTERNAL_HASH_ONLY":
-            signature_valid = None
-        elif v.get("signing_key_id"):
-            kr = supabase.table("user_keys").select("public_key,algorithm").eq("key_id", v["signing_key_id"]).limit(1).execute()
-            if kr.data:
-                signature_valid = verify_signature(kr.data[0]["public_key"], v["file_hash"], v["signature"])
-        elif v.get("uploader_id"):
-            kr = supabase.table("user_keys").select("public_key,algorithm").eq("user_id", v["uploader_id"]).eq("key_status", "active").limit(1).execute()
-            if kr.data:
-                signature_valid = verify_signature(kr.data[0]["public_key"], v["file_hash"], v["signature"])
-        chain_valid = True
-        if int(v.get("version_number") or 1) > 1:
-            prev = (supabase.table("document_versions").select("file_hash")
-                    .eq("document_id", v["document_id"])
-                    .eq("version_number", int(v.get("version_number") or 1)-1).limit(1).execute())
-            chain_valid = bool(prev.data and secrets.compare_digest(v.get("previous_version_hash") or "", prev.data[0]["file_hash"]))
-        valid = bool(hash_valid and chain_valid and signature_valid is not False)
-        msg = "Integrity verified." if valid else "Integrity could not be verified. Viewing is blocked."
-        return {"valid": valid, "hash_valid": hash_valid, "signature_valid": signature_valid, "chain_valid": chain_valid, "message": msg}
-    except Exception as exc:
-        return {"valid": False, "hash_valid": False, "signature_valid": None, "chain_valid": False, "message": f"Integrity check failed: {error_text(exc)}"}
-
-
 @app.get("/case/documents")
-def case_documents(case_id: str, authorization: str | None = Header(default=None)):
+def case_documents(
+    case_id: str,
+    authorization: str | None = Header(default=None),
+):
     u = get_current_user(authorization)
     require_elevated(u, "viewing case files", "VIEW_FILES")
     m = membership(u["user_id"], case_id)
     allowed = set(m.get("allowed_document_types") or [])
     try:
-        r = (supabase.table("documents")
-             .select("document_id,case_id,document_type,file_type,uploader_id,current_version_id")
-             .eq("case_id", case_id).order("document_type", desc=False).execute())
-        visible=[]; warnings=0
+        r = (
+            supabase.table("documents")
+            .select("document_id,case_id,document_type,file_type,uploader_id,current_version_id")
+            .eq("case_id", case_id).order("document_type", desc=False).execute()
+        )
+        visible = []
         for d in r.data or []:
             if d["document_type"] not in allowed:
                 continue
-            vr=(supabase.table("document_versions")
+            vr = (
+                supabase.table("document_versions")
                 .select("version_id,version_number,storage_path,file_hash,signature,timestamp,previous_version_hash,signing_key_id")
-                .eq("document_id",d["document_id"]).order("version_number",desc=True).limit(1).execute())
-            v=vr.data[0] if vr.data else {}
-            integrity=_verify_version_integrity_internal(v["version_id"]) if v.get("version_id") else {"valid":False,"message":"No document version found."}
-            if not integrity.get("valid"): warnings+=1
-            ai={"status":"not_started","extracted_text":"","pages":[]}
-            if v.get("version_id"):
-                ar=(supabase.table("case_ai_documents")
-                    .select("status,provider,model,fallback_used,extracted_text,pages,confidence,error,created_at,queued_at,started_at,completed_at,stage,progress_percent,estimated_seconds")
-                    .eq("version_id",v["version_id"]).limit(1).execute())
-                if ar.data: ai=ar.data[0]
+                .eq("document_id", d["document_id"])
+                .order("version_number", desc=True).limit(1).execute()
+            )
+            v = vr.data[0] if vr.data else {}
             visible.append({
-                "document_id":d["document_id"],"case_id":d["case_id"],"document_type":d["document_type"],"file_type":d["file_type"],
-                "uploader_id":d["uploader_id"],"current_version_id":d["current_version_id"],
-                "filename":Path(v.get("storage_path") or "").name or "Document", "integrity":integrity, "ai":ai,
-                "version":{"version_id":v.get("version_id"),"version_number":v.get("version_number"),"timestamp":v.get("timestamp")}
+                "document_id": d["document_id"], "case_id": d["case_id"],
+                "document_type": d["document_type"], "file_type": d["file_type"],
+                "uploader_id": d["uploader_id"], "current_version_id": d["current_version_id"],
+                "filename": Path(v.get("storage_path", "")).name or "Unnamed file",
+                "version": {
+                    "version_id": v.get("version_id"), "version_number": v.get("version_number"),
+                    "file_hash": v.get("file_hash"), "signature": v.get("signature"),
+                    "timestamp": v.get("timestamp"),
+                },
             })
-        c=supabase.table("cases").select("ai_enabled,head_user_id,created_by").eq("case_id",case_id).limit(1).execute()
-        ai_enabled=bool(c.data and c.data[0].get("ai_enabled"))
-        return {"my_permission_level":m["permission_level"],"my_allowed_document_types":sorted(allowed),"documents":visible,"integrity_warning_count":warnings,"ai_enabled":ai_enabled,"is_case_head":bool(c.data and u["user_id"]==(c.data[0].get("head_user_id") or c.data[0].get("created_by")))}
-    except HTTPException: raise
+        return {"my_permission_level": m["permission_level"], "my_allowed_document_types": sorted(allowed), "documents": visible}
     except Exception as exc:
-        raise HTTPException(500,f"Could not load case files: {error_text(exc)}")
+        raise HTTPException(500, f"Could not load case files: {error_text(exc)}")
 
 
 @app.get("/documents/versions/{document_id}")
@@ -1575,65 +1455,50 @@ def document_versions(document_id: str, authorization: str | None = Header(defau
 
 
 @app.get("/documents/file/{version_id}")
-def document_file(version_id: str, authorization: str | None = Header(default=None)):
-    u=get_current_user(authorization); require_elevated(u,"opening case files","VIEW_FILES")
-    vr=supabase.table("document_versions").select("version_id,document_id,storage_path").eq("version_id",version_id).limit(1).execute()
-    if not vr.data: raise HTTPException(404,"Document version not found.")
-    v=vr.data[0]
-    dr=supabase.table("documents").select("document_id,case_id,document_type").eq("document_id",v["document_id"]).limit(1).execute()
-    if not dr.data: raise HTTPException(404,"Document not found.")
-    d=dr.data[0]; m=membership(u["user_id"],d["case_id"])
-    if d["document_type"] not in set(m.get("allowed_document_types") or []): raise HTTPException(403,"You are not authorized to view this document.")
-    integrity=_verify_version_integrity_internal(version_id)
-    if not integrity.get("valid"):
-        raise HTTPException(409, integrity.get("message") or "Document integrity verification failed.")
-    signed=supabase.storage.from_(DOCUMENT_BUCKET).create_signed_url(v["storage_path"],120)
-    url=signed.get("signedURL") or signed.get("signedUrl") or signed.get("signed_url")
-    if not url: raise HTTPException(500,"Could not create secure file URL.")
-    return {"url":url,"expires_in":120,"integrity":integrity}
-
-
-@app.get("/documents/preview/{version_id}")
-def document_preview(version_id: str, authorization: str | None = Header(default=None)):
-    """Return the authorized original bytes for the controlled in-app preview.
-
-    The frontend renders PDFs/images with PDF.js/canvas, so the browser's native
-    PDF toolbar (download/print) is never exposed. Access is still protected by
-    session elevation, case membership, and automatic integrity verification.
-    """
+def document_file(
+    version_id: str,
+    authorization: str | None = Header(default=None),
+):
     u = get_current_user(authorization)
     require_elevated(u, "opening case files", "VIEW_FILES")
-    vr = supabase.table("document_versions").select("version_id,document_id,storage_path").eq("version_id", version_id).limit(1).execute()
-    if not vr.data:
-        raise HTTPException(404, "Document version not found.")
-    v = vr.data[0]
-    dr = supabase.table("documents").select("case_id,document_type").eq("document_id", v["document_id"]).limit(1).execute()
-    if not dr.data:
-        raise HTTPException(404, "Document not found.")
-    d = dr.data[0]
-    m = membership(u["user_id"], d["case_id"])
-    if d["document_type"] not in set(m.get("allowed_document_types") or []):
-        raise HTTPException(403, "You are not authorized to view this document.")
-    integrity = _verify_version_integrity_internal(version_id)
-    if not integrity.get("valid"):
-        raise HTTPException(409, integrity.get("message") or "Document integrity verification failed.")
     try:
-        data = supabase.storage.from_(DOCUMENT_BUCKET).download(v["storage_path"])
+        vr = (
+            supabase.table("document_versions")
+            .select("version_id,document_id,storage_path")
+            .eq("version_id", version_id).limit(1).execute()
+        )
+        if not vr.data:
+            raise HTTPException(404, "Document version not found.")
+
+        v = vr.data[0]
+        dr = (
+            supabase.table("documents")
+            .select("document_id,case_id,document_type")
+            .eq("document_id", v["document_id"]).limit(1).execute()
+        )
+        if not dr.data:
+            raise HTTPException(404, "Document not found.")
+
+        d = dr.data[0]
+        m = membership(u["user_id"], d["case_id"])
+        if d["document_type"] not in set(m.get("allowed_document_types") or []):
+            raise HTTPException(403, "You are not authorized to view this document.")
+
+        signed = supabase.storage.from_(DOCUMENT_BUCKET).create_signed_url(
+            v["storage_path"], 120
+        )
+        url = (
+            signed.get("signedURL")
+            or signed.get("signedUrl")
+            or signed.get("signed_url")
+        )
+        if not url:
+            raise RuntimeError(f"Supabase did not return a signed URL: {signed}")
+        return {"url": url, "expires_in": 120}
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(502, f"Could not load the secured original: {error_text(exc)}")
-    filename = Path(v["storage_path"]).name
-    ctype = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-    safe_name = filename.replace('"', '')
-    return Response(
-        content=data,
-        media_type=ctype,
-        headers={
-            "Content-Disposition": f'inline; filename="{safe_name}"',
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-            "Pragma": "no-cache",
-            "X-Document-Integrity": "verified",
-        },
-    )
+        raise HTTPException(500, f"Could not create secure file URL: {error_text(exc)}")
 
 
 @app.get("/documents/verify/{version_id}")
@@ -1740,7 +1605,6 @@ def check_upload_permission(user_id, case_id, document_type):
 
 @app.post("/documents/upload")
 async def upload_document(
-    background_tasks: BackgroundTasks,
     case_id: str = Form(...),
     document_type: str = Form(...),
     file: UploadFile = File(...),
@@ -1764,7 +1628,7 @@ async def upload_document(
         raise HTTPException(413, "File is larger than 50 MB.")
 
     try:
-        ft = "image" if ext in {".jpg", ".jpeg", ".png"} else ("pdf" if ext == ".pdf" else "text")
+        ft = "image" if ext in {".jpg", ".jpeg", ".png"} else "text"
         h = calculate_file_hash(data)
         ensure_user_key(u["user_id"], supabase)
         signed = sign_file_hash(u["user_id"], h, supabase)
@@ -1802,11 +1666,7 @@ async def upload_document(
             raise RuntimeError("document_versions insert returned no row.")
         supabase.table("documents").update({"current_version_id": vid, "file_type": ft, "uploader_id": u["user_id"]}).eq("document_id", did).execute()
         notify(u["user_id"], "File uploaded", f"{name} uploaded as version {version_number}.", "document_uploaded", case_id=case_id)
-        if _case_ai_enabled(case_id):
-            queued = _queue_ai_job(vid)
-            if queued and background_tasks is not None:
-                background_tasks.add_task(_process_ai_job, vid)
-        return {"success": True, "message": f"File uploaded as Version {version_number}.", "document_id": did, "version_id": vid, "version_number": version_number, "file_hash": h, "signature": signed["signature"], "storage_path": path, "ai_queued": _case_ai_enabled(case_id)}
+        return {"success": True, "message": f"File uploaded as Version {version_number}.", "document_id": did, "version_id": vid, "version_number": version_number, "file_hash": h, "signature": signed["signature"], "storage_path": path}
     except HTTPException:
         raise
     except Exception as exc:
@@ -1919,531 +1779,104 @@ def case_invite(req: CaseInviteRequest, authorization: str | None = Header(defau
     return {"success": True, "message": f"{req.employee_id} added to the case."}
 
 
-# --------------------------- CASE AI ---------------------------
-# PaddleOCR is intentionally removed. AI extraction is cloud-based through
-# Ollama Cloud with Gemini as an automatic fallback. Native text extraction
-# is still used for digital PDFs/DOCX/PPTX/TXT because it is instant and
-# avoids spending AI quota when OCR is unnecessary.
-from ai_engine import extract_document, answer_question, chunk_pages, estimate_document_seconds
+# --------------------------- OCR ---------------------------
 
-_AI_ACTIVE_VERSIONS: dict[str, str] = {}
-_AI_ACTIVE_LOCK = threading.Lock()
-
-
-def _case_ai_enabled(case_id: str) -> bool:
-    r = supabase.table("cases").select("ai_enabled").eq("case_id", case_id).limit(1).execute()
-    return bool(r.data and r.data[0].get("ai_enabled"))
-
-
-def _queue_ai_job(version_id: str, force: bool = False) -> bool:
-    """Create exactly one AI job record for an immutable document version.
-    Returns True only when this call actually queued a job.
-    """
+def _ocr_image_bytes(data: bytes, language: str = "eng") -> str:
+    """OCR a single image. Requires Pillow + pytesseract + Tesseract binary."""
     try:
-        vr = (supabase.table("document_versions")
-              .select("version_id,document_id,storage_path")
-              .eq("version_id", version_id).limit(1).execute())
-        if not vr.data:
-            return False
-        v = vr.data[0]
-        dr = (supabase.table("documents")
-              .select("document_id,case_id,document_type")
-              .eq("document_id", v["document_id"]).limit(1).execute())
-        if not dr.data:
-            return False
-        d = dr.data[0]
-        if not _case_ai_enabled(d["case_id"]):
-            return False
-        existing = (supabase.table("case_ai_documents")
-                    .select("ai_document_id,status")
-                    .eq("version_id", version_id).limit(1).execute())
-        queued = iso(now())
-        if existing.data:
-            status = existing.data[0].get("status")
-            # Immutable version: never re-run a completed extraction automatically.
-            if status == "completed":
-                return False
-            if status in {"processing", "pending"} and not force:
-                return False
-            supabase.table("case_ai_documents").update({
-                "status": "pending", "error": None, "stage": "queued",
-                "progress_percent": 0, "queued_at": queued, "started_at": None,
-                "completed_at": None
-            }).eq("ai_document_id", existing.data[0]["ai_document_id"]).execute()
-        else:
-            supabase.table("case_ai_documents").insert({
-                "case_id": d["case_id"], "document_id": d["document_id"],
-                "version_id": version_id, "document_type": d["document_type"],
-                "status": "pending", "stage": "queued", "progress_percent": 0,
-                "queued_at": queued
-            }).execute()
-        return True
-    except Exception:
-        # Upload must remain successful even if AI tracking cannot be initialized.
-        return False
+        from PIL import Image, ImageOps, ImageFilter
+        import pytesseract
+        import io
+    except ImportError as exc:
+        raise HTTPException(500, "OCR dependencies are missing. Install Pillow and pytesseract.") from exc
 
-
-def _process_ai_job(version_id: str):
-    # The queued_at timestamp acts as a run-generation marker. If a user
-    # retries a stalled job, the new run gets a new queued_at value. An older
-    # worker may still exist briefly, but it is prevented from overwriting the
-    # newer run's status/chunks.
-    row = None
     try:
-        r = (supabase.table("case_ai_documents")
-             .select("*").eq("version_id", version_id).limit(1).execute())
-        if not r.data:
-            return
-        row = r.data[0]
-        ai_id = row["ai_document_id"]
-        run_marker = row.get("queued_at") or row.get("created_at") or str(uuid.uuid4())
-        with _AI_ACTIVE_LOCK:
-            if _AI_ACTIVE_VERSIONS.get(version_id) == run_marker:
-                return
-            _AI_ACTIVE_VERSIONS[version_id] = run_marker
-        started = now()
-
-        def ensure_current_run():
-            current = (supabase.table("case_ai_documents")
-                       .select("status,queued_at,started_at")
-                       .eq("ai_document_id", ai_id).limit(1).execute())
-            if not current.data:
-                raise RuntimeError("AI processing record no longer exists.")
-            latest = current.data[0]
-            if latest.get("queued_at") != run_marker:
-                raise RuntimeError("This AI processing run was superseded by a retry.")
-            return latest
-
-        def progress(stage: str, percent: int | None = None):
-            ensure_current_run()
-            update = {"stage": stage}
-            if percent is not None:
-                update["progress_percent"] = max(0, min(99, int(percent)))
-            supabase.table("case_ai_documents").update(update).eq("ai_document_id", ai_id).execute()
-
-        ensure_current_run()
-        supabase.table("case_ai_documents").update({
-            "status": "processing", "error": None, "started_at": iso(started),
-            "stage": "downloading_document", "progress_percent": 5
-        }).eq("ai_document_id", ai_id).execute()
-
-        vr = (supabase.table("document_versions")
-              .select("storage_path").eq("version_id", version_id).limit(1).execute())
-        if not vr.data:
-            raise RuntimeError("Document version not found.")
-        data = storage_download(vr.data[0]["storage_path"])
-        filename = Path(vr.data[0]["storage_path"]).name
-        estimate = estimate_document_seconds(data, filename)
-        ensure_current_run()
-        supabase.table("case_ai_documents").update({
-            "stage": "document_loaded", "progress_percent": 10,
-            "estimated_seconds": estimate
-        }).eq("ai_document_id", ai_id).execute()
-
-        progress("sending_to_ai", 15)
-        result = extract_document(data, filename, progress_callback=progress)
-        provider = result.get("provider") or "unknown"
-        if provider == "native":
-            progress("native_extraction_complete", 85)
-        else:
-            progress("ai_extraction_complete", 85)
-        progress("saving_extracted_text", 88)
-        pages = result.get("pages") or []
-        text = result.get("text") or ""
-        ensure_current_run()
-        supabase.table("case_ai_documents").update({
-            "status": "processing", "provider": result.get("provider"),
-            "model": result.get("model"), "fallback_used": bool(result.get("fallback_used")),
-            "extracted_text": text, "pages": pages, "confidence": result.get("confidence"),
-            "stage": "creating_searchable_chunks", "progress_percent": 92,
-        }).eq("ai_document_id", ai_id).execute()
-
-        ensure_current_run()
-        supabase.table("case_ai_chunks").delete().eq("version_id", version_id).execute()
-        chunks = chunk_pages(pages, AI_CHUNK_SIZE)
-        if chunks:
-            rows = [{"case_id": row["case_id"], "document_id": row["document_id"],
-                     "version_id": version_id, "page_number": c["page"],
-                     "chunk_index": c["chunk_index"], "text": c["text"]}
-                    for c in chunks]
-            # Small batches make Supabase failures less likely on large reports.
-            for start_idx in range(0, len(rows), 50):
-                ensure_current_run()
-                batch = rows[start_idx:start_idx + 50]
-                last_exc = None
-                for attempt in range(3):
-                    try:
-                        supabase.table("case_ai_chunks").upsert(batch, on_conflict="version_id,chunk_index", ignore_duplicates=False).execute()
-                        last_exc = None
-                        break
-                    except Exception as exc:
-                        last_exc = exc
-                        if attempt < 2:
-                            time.sleep(1.5 * (attempt + 1))
-                if last_exc is not None:
-                    raise last_exc
-
-        ensure_current_run()
-        supabase.table("case_ai_documents").update({
-            "status": "completed", "stage": "completed", "progress_percent": 100,
-            "completed_at": iso(now()), "error": None,
-        }).eq("ai_document_id", ai_id).execute()
+        image = Image.open(io.BytesIO(data)).convert("L")
+        # Light preprocessing helps scanned documents without changing the source file.
+        image = ImageOps.autocontrast(image)
+        image = image.resize((image.width * 2, image.height * 2))
+        image = image.filter(ImageFilter.SHARPEN)
+        text = pytesseract.image_to_string(image, lang=language, config="--psm 6")
+        return text.strip()
     except Exception as exc:
-        if row:
-            try:
-                current = (supabase.table("case_ai_documents")
-                           .select("queued_at")
-                           .eq("ai_document_id", row["ai_document_id"]).limit(1).execute())
-                if current.data and current.data[0].get("queued_at") == run_marker:
-                    supabase.table("case_ai_documents").update({
-                        "status": "failed", "stage": "failed", "progress_percent": 0,
-                        "error": error_text(exc), "completed_at": iso(now())
-                    }).eq("ai_document_id", row["ai_document_id"]).execute()
-            except Exception:
-                pass
-    finally:
-        with _AI_ACTIVE_LOCK:
-            if _AI_ACTIVE_VERSIONS.get(version_id) == run_marker:
-                _AI_ACTIVE_VERSIONS.pop(version_id, None)
+        raise HTTPException(500, f"OCR failed: {error_text(exc)}")
 
 
-def _is_case_head(user_id: str, case_id: str) -> bool:
-    head_id, _ = repair_case_head(case_id)
-    return user_id == head_id
-
-
-class CaseAIToggleRequest(BaseModel):
-    case_id: str
-    enabled: bool
-
-
-class CaseAIChatRequest(BaseModel):
-    case_id: str
-    question: str
-
-
-@app.get("/case/ai/status")
-def case_ai_status(case_id: str, authorization: str | None = Header(default=None)):
-    u = get_current_user(authorization)
-    membership(u["user_id"], case_id)
-    r = db_call(lambda: supabase.table("cases").select("ai_enabled,ai_enabled_by,ai_enabled_at,ai_provider,ai_model,head_user_id,created_by").eq("case_id", case_id).limit(1).execute())
-    if not r.data:
-        raise HTTPException(404, "Case not found.")
-    c = r.data[0]
-    head_id = c.get("head_user_id") or c.get("created_by")
+def _ocr_pdf_bytes(data: bytes, language: str = "eng") -> str:
+    """OCR every PDF page by rendering it to an image first."""
     try:
-        head_id, _ = repair_case_head(case_id)
-    except Exception:
-        pass
-    head_name = "Unknown"
-    try:
-        hr=db_call(lambda: (supabase.table("users").select("employee_registry!fk_users_employee(full_name)")
-            .eq("user_id",head_id).limit(1).execute()))
-        if hr.data:
-            head_name=((hr.data[0].get("employee_registry") or {}).get("full_name") or "Unknown")
-    except Exception:
-        pass
-
-    jobs_warning = None
-    try:
-        jobs = (db_call(lambda: (supabase.table("case_ai_documents")
-                .select("ai_document_id,document_id,version_id,document_type,status,provider,model,fallback_used,error,created_at,queued_at,started_at,completed_at,stage,progress_percent,estimated_seconds")
-                .eq("case_id", case_id).order("created_at", desc=True).execute())).data or [])
-    except Exception as exc:
-        jobs = []
-        jobs_warning = f"AI activity could not be refreshed right now: {error_text(exc)}"
-    pending = [j for j in jobs if j.get("status") in {"pending", "processing"}]
-    return {
-        "enabled": bool(c.get("ai_enabled")),
-        "is_head": u["user_id"] == head_id,
-        "head_user_id": head_id,
-        "head_name": head_name,
-        "provider": c.get("ai_provider") or "ollama+gemini-fallback",
-        "model": AI_OLLAMA_MODEL,
-        "pending_count": len(pending),
-        "jobs": jobs[:25],
-        "status_warning": jobs_warning,
-    }
-
-
-@app.post("/case/ai/retry")
-def retry_case_ai(version_id: str, background_tasks: BackgroundTasks, authorization: str | None = Header(default=None)):
-    # Retrying AI extraction is a recovery operation, not a privileged
-    # document-access change. No email OTP is required. The normal session,
-    # case membership and Case Head authorization still apply.
-    u = get_current_user(authorization)
-    vr = db_call(lambda: supabase.table("document_versions").select("version_id,document_id").eq("version_id", version_id).limit(1).execute())
-    if not vr.data:
-        raise HTTPException(404, "Document version not found.")
-    dr = db_call(lambda: supabase.table("documents").select("case_id").eq("document_id", vr.data[0]["document_id"]).limit(1).execute())
-    if not dr.data:
-        raise HTTPException(404, "Document not found.")
-    case_id = dr.data[0]["case_id"]
-    membership(u["user_id"], case_id)
-    if not _is_case_head(u["user_id"], case_id):
-        raise HTTPException(403, "Only the case Head can retry Case AI extraction.")
-    if not _case_ai_enabled(case_id):
-        raise HTTPException(400, "Case AI is currently disabled.")
-    r = db_call(lambda: supabase.table("case_ai_documents").select("status").eq("version_id", version_id).limit(1).execute())
-    if not r.data:
-        raise HTTPException(404, "No AI processing record exists for this version.")
-    status = r.data[0].get("status")
-    if status == "completed":
-        raise HTTPException(400, "This document has already been extracted successfully.")
-    queued = _queue_ai_job(version_id, force=True)
-    if queued:
-        # If an older in-process worker survived, let the new run supersede it.
-        # Its run marker no longer matches, so it cannot overwrite the retry.
-        background_tasks.add_task(_process_ai_job, version_id)
-    return {"success": True, "message": "AI extraction restarted. The existing document is unchanged; track the new processing status below."}
-
-
-@app.post("/case/ai/toggle")
-def toggle_case_ai(req: CaseAIToggleRequest, background_tasks: BackgroundTasks, authorization: str | None = Header(default=None)):
-    u = get_current_user(authorization)
-    membership(u["user_id"], req.case_id)
-    require_elevated(u, "changing Case AI settings", "MANAGE_MEMBERS")
-    if not _is_case_head(u["user_id"], req.case_id):
-        raise HTTPException(403, "Only the case Head can enable or disable Case AI.")
-    update = {
-        "ai_enabled": bool(req.enabled),
-        "ai_enabled_by": u["user_id"] if req.enabled else None,
-        "ai_enabled_at": iso(now()) if req.enabled else None,
-        "ai_provider": "ollama+gemini-fallback" if req.enabled else None,
-        "ai_model": AI_OLLAMA_MODEL if req.enabled else None,
-    }
-    supabase.table("cases").update(update).eq("case_id", req.case_id).execute()
-    if req.enabled:
-        docs = supabase.table("documents").select("document_id,current_version_id").eq("case_id", req.case_id).execute().data or []
-        for d in docs:
-            if d.get("current_version_id"):
-                queued = _queue_ai_job(d["current_version_id"])
-                if queued:
-                    background_tasks.add_task(_process_ai_job, d["current_version_id"])
-    return {"success": True, "enabled": req.enabled, "message": "Case AI enabled." if req.enabled else "Case AI disabled."}
-
-
-@app.get("/documents/ai-status/{version_id}")
-def document_ai_status(version_id: str, authorization: str | None = Header(default=None)):
-    u = get_current_user(authorization)
-    vr = supabase.table("document_versions").select("document_id").eq("version_id", version_id).limit(1).execute()
-    if not vr.data:
-        raise HTTPException(404, "Document version not found.")
-    dr = supabase.table("documents").select("case_id,document_type").eq("document_id", vr.data[0]["document_id"]).limit(1).execute()
-    if not dr.data:
-        raise HTTPException(404, "Document not found.")
-    d = dr.data[0]
-    m = membership(u["user_id"], d["case_id"])
-    if d["document_type"] not in set(m.get("allowed_document_types") or []):
-        raise HTTPException(403, "You are not authorized to view this document.")
-    r = supabase.table("case_ai_documents").select("status,provider,model,fallback_used,extracted_text,pages,confidence,error,created_at,queued_at,started_at,completed_at,stage,progress_percent,estimated_seconds").eq("version_id", version_id).limit(1).execute()
-    return (r.data[0] if r.data else {"status":"not_started","extracted_text":"","pages":[]})
-
-# Backward-compatible route name so older frontend builds do not break.
-@app.get("/documents/ocr-status/{version_id}")
-def legacy_ocr_status(version_id: str, authorization: str | None = Header(default=None)):
-    return document_ai_status(version_id, authorization)
-
-
-def _tokenize(text: str) -> list[str]:
-    import re
-    return re.findall(r"[a-z0-9]+", (text or "").lower())
-
-
-def _retrieve_case_context(case_id: str, question: str):
-    docs = (supabase.table("documents")
-            .select("document_id,current_version_id,document_type")
-            .eq("case_id", case_id).execute().data or [])
-    current = {d["current_version_id"]: d for d in docs if d.get("current_version_id")}
-    if not current:
-        return []
-
-    rows = (supabase.table("case_ai_chunks")
-            .select("document_id,version_id,page_number,chunk_index,text")
-            .eq("case_id", case_id)
-            .in_("version_id", list(current.keys()))
-            .order("chunk_index", desc=False).execute().data or [])
-    if not rows:
-        return []
-
-    # For small cases, send every processed chunk. This is much more reliable
-    # than keyword-only retrieval for questions such as "what is the summary?"
-    if len(rows) <= 12:
-        return rows
-
-    stop = {"the","and","for","what","are","is","was","were","this","that",
-            "with","from","about","tell","give","show","case","document","please",
-            "can","you","who","when","where","why","how"}
-    q = [t for t in _tokenize(question) if len(t) >= 3 and t not in stop]
-    qset = set(q)
-    scored = []
-    for r in rows:
-        tokens = _tokenize(r.get("text", ""))
-        token_set = set(tokens)
-        overlap = len(qset & token_set)
-        # Frequency gives a useful tie-breaker without requiring embeddings.
-        freq = sum(tokens.count(t) for t in qset)
-        phrase_bonus = 0
-        qphrase = " ".join(q[:4])
-        if qphrase and qphrase in (r.get("text", "").lower()):
-            phrase_bonus = 5
-        scored.append((overlap * 10 + freq + phrase_bonus, r.get("chunk_index", 0), r))
-    scored.sort(key=lambda x: (-x[0], x[1]))
-    selected = [r for score, _, r in scored[:AI_TOP_K] if score > 0]
-    if selected:
-        return selected
-    # If lexical matching fails, still give the model the first chunks, which
-    # usually contain document title/case summary/metadata.
-    return rows[:min(AI_TOP_K, len(rows))]
-
-
-@app.post("/case/ai/chat")
-def case_ai_chat(req: CaseAIChatRequest, authorization: str | None = Header(default=None)):
-    """Answer only from processed, current-version chunks for this case."""
-    u = get_current_user(authorization)
-    membership(u["user_id"], req.case_id)
-    if not _case_ai_enabled(req.case_id):
-        raise HTTPException(403, "Case AI is disabled. The Case Head must enable it first.")
-    question = req.question.strip()
-    if not question:
-        raise HTTPException(400, "Question cannot be empty.")
+        import fitz  # PyMuPDF
+    except ImportError as exc:
+        raise HTTPException(500, "PDF OCR dependency is missing. Install PyMuPDF.") from exc
 
     try:
-        context = _retrieve_case_context(req.case_id, question)
-    except Exception as exc:
-        raise HTTPException(503, f"Could not load Case AI sources: {error_text(exc)}")
-
-    if not context:
-        jobs = (supabase.table("case_ai_documents")
-                .select("document_type,status,stage,error")
-                .eq("case_id", req.case_id).order("created_at", desc=True).limit(50).execute().data or [])
-        active = [j for j in jobs if j.get("status") in {"pending", "processing"}]
-        failed = [j for j in jobs if j.get("status") == "failed"]
-        if active:
-            answer = "Case AI is still processing the case documents. Please wait until the relevant documents show Completed, then ask again."
-        elif failed:
-            details = "; ".join(f"{j.get('document_type')}: {j.get('error') or 'processing failed'}" for j in failed[:5])
-            answer = f"I cannot answer reliably yet because these document extractions failed: {details}"
-        else:
-            answer = "No processed document content is available for this case yet."
-        sources = []
-        provider = "system"
-        latency_ms = 0
-    else:
-        prompt_parts = []
-        for i, c in enumerate(context, 1):
-            page = c.get("page_number") or 1
-            prompt_parts.append(f"[SOURCE {i} | page {page}]\n{c.get('text','')}")
-        prompt = (
-            "You are the read-only Case AI for a secure police document management system. "
-            "Use ONLY the supplied sources from this case. Do not use outside knowledge. "
-            "Do not invent, infer, or guess facts. "
-            "If the requested information is not present in the supplied sources, explicitly say "
-            "'I could not find that information in the processed case documents.' "
-            "For summaries, synthesize only what the sources say. "
-            "Preserve names, dates, identifiers and numbers exactly when stated. "
-            "Cite supporting material using [SOURCE n, page X].\n\n"
-            + "\n\n".join(prompt_parts)
-            + f"\n\nQUESTION: {question}"
-        )
-        started = time.monotonic()
-        try:
-            result = answer_question(prompt)
-        except Exception as exc:
-            raise HTTPException(502, f"Case AI could not generate an answer. Ollama and Gemini were both unavailable or rejected the request. Details: {error_text(exc)}")
-        latency_ms = int((time.monotonic() - started) * 1000)
-        answer = result.get("text") or "The AI provider returned an empty answer."
-        provider = result.get("provider") or "unknown"
-        sources = [{
-            "page": c.get("page_number"),
-            "document_id": c.get("document_id"),
-            "version_id": c.get("version_id"),
-            "chunk_index": c.get("chunk_index"),
-        } for c in context]
-
-    # Conversation history must never make a valid AI answer fail.
-    try:
-        supabase.table("case_ai_messages").insert({
-            "case_id": req.case_id, "user_id": u["user_id"], "role": "user", "content": question
-        }).execute()
-        supabase.table("case_ai_messages").insert({
-            "case_id": req.case_id, "user_id": u["user_id"], "role": "assistant",
-            "content": answer, "sources": sources
-        }).execute()
-    except Exception:
-        pass
-
-    return {
-        "answer": answer,
-        "sources": sources,
-        "provider": provider,
-        "context_chunks": len(context),
-        "latency_ms": latency_ms,
-    }
-
-
-class CloseCaseRequest(BaseModel):
-    case_id: str
-
-
-@app.post("/case/close")
-def close_case(req: CloseCaseRequest, authorization: str | None = Header(default=None)):
-    u = get_current_user(authorization)
-    membership(u["user_id"], req.case_id)
-    require_elevated(u, "closing this case", "MANAGE_MEMBERS")
-    if not _is_case_head(u["user_id"], req.case_id):
-        raise HTTPException(403, "Only the Case Head can close this case.")
-
-    try:
-        r = db_call(lambda: supabase.table("cases").select("case_id,status").eq("case_id", req.case_id).limit(1).execute())
-        if not r.data:
-            raise HTTPException(404, "Case not found.")
-
-        status = str(r.data[0].get("status", "")).lower()
-        if status in {"closed", "completed", "archived"}:
-            return {"success": True, "message": "Case is already closed.", "status": r.data[0].get("status")}
-
-        # Keep the case, documents, hashes, signatures and audit history in
-        # the database. Only the application's active access is revoked.
-        participants = db_call(lambda: (supabase.table("external_case_participants")
-            .select("participant_id")
-            .eq("case_id", req.case_id).execute())).data or []
-        for p in participants:
-            pid = p.get("participant_id")
-            if not pid:
-                continue
-            # Existing external sessions become invalid immediately.
-            try:
-                supabase.table("external_sessions").delete().eq("participant_id", pid).execute()
-            except Exception:
-                pass
-            # Preserve the participant record for audit, but remove the
-            # credential and invitation token so it can never be reused.
-            try:
-                supabase.table("external_case_participants").update({
-                    "status": "revoked",
-                    "password_hash": None,
-                    "password_set_at": None,
-                    "invitation_token_hash": None,
-                }).eq("participant_id", pid).execute()
-            except Exception:
-                pass
-
-        db_call(lambda: supabase.table("cases").update({
-            "status": "closed"
-        }).eq("case_id", req.case_id).execute())
-
-        return {
-            "success": True,
-            "message": "Case closed. The case remains preserved in the database; it is hidden from the application and all external access has been revoked.",
-            "status": "closed",
-            "external_access_revoked": len(participants),
-        }
+        doc = fitz.open(stream=data, filetype="pdf")
+        parts = []
+        for page_no, page in enumerate(doc, start=1):
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            text = _ocr_image_bytes(pix.tobytes("png"), language)
+            if text:
+                parts.append(f"--- Page {page_no} ---\n{text}")
+        return "\n\n".join(parts).strip()
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(500, f"Could not close case: {error_text(exc)}")
+        raise HTTPException(500, f"PDF OCR failed: {error_text(exc)}")
 
+
+def _run_ocr(data: bytes, filename: str, language: str = "eng") -> str:
+    ext = Path(filename or "").suffix.lower()
+    if ext == ".pdf":
+        return _ocr_pdf_bytes(data, language)
+    if ext in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}:
+        return _ocr_image_bytes(data, language)
+    raise HTTPException(400, "OCR currently supports PDF, PNG, JPG, JPEG, WEBP, BMP, TIF and TIFF files.")
+
+
+@app.post("/ocr/extract")
+async def ocr_extract(
+    file: UploadFile = File(...),
+    language: str = Form("eng"),
+    authorization: str | None = Header(default=None),
+):
+    u = get_current_user(authorization)
+    require_elevated(u, "OCR processing", "VIEW_FILES")
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "The uploaded file is empty.")
+    if len(data) > MAX_FILE_SIZE:
+        raise HTTPException(413, "File is too large for OCR.")
+    text = _run_ocr(data, file.filename or "document", language.strip() or "eng")
+    return {"filename": file.filename, "language": language, "text": text, "characters": len(text)}
+
+
+@app.post("/documents/ocr/{version_id}")
+def ocr_stored_document(
+    version_id: str,
+    language: str = Form("eng"),
+    authorization: str | None = Header(default=None),
+):
+    u = get_current_user(authorization)
+    require_elevated(u, "OCR processing", "VIEW_FILES")
+    try:
+        vr = supabase.table("document_versions").select("version_id,document_id,storage_path").eq("version_id", version_id).limit(1).execute()
+        if not vr.data:
+            raise HTTPException(404, "Document version not found.")
+        v = vr.data[0]
+        dr = supabase.table("documents").select("document_id,case_id,document_type").eq("document_id", v["document_id"]).limit(1).execute()
+        if not dr.data:
+            raise HTTPException(404, "Document not found.")
+        d = dr.data[0]
+        m = membership(u["user_id"], d["case_id"])
+        if d["document_type"] not in set(m.get("allowed_document_types") or []):
+            raise HTTPException(403, "You are not authorized to OCR this document.")
+        data = supabase.storage.from_(DOCUMENT_BUCKET).download(v["storage_path"])
+        text = _run_ocr(data, Path(v["storage_path"]).name, language.strip() or "eng")
+        return {"version_id": version_id, "document_type": d["document_type"], "language": language, "text": text, "characters": len(text)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Could not OCR stored document: {error_text(exc)}")
 
 class ExternalCaseInviteRequest(BaseModel):
     case_id: str
@@ -2457,285 +1890,95 @@ class ExternalCaseInviteRequest(BaseModel):
     allowed_document_types: list[str]
     expires_hours: int = 72
 
-
-class ExternalAcceptRequest(BaseModel):
-    token: str
-    password: str
-
-
-class ExternalLoginRequest(BaseModel):
-    email: str
-    password: str
-
-
-def _validate_external_password(password: str):
-    if len(password) < 8:
-        raise HTTPException(400, "Password must be at least 8 characters.")
-    if not any(c.isupper() for c in password):
-        raise HTTPException(400, "Password must contain at least one uppercase letter.")
-    if not any(c.islower() for c in password):
-        raise HTTPException(400, "Password must contain at least one lowercase letter.")
-    if not any(c.isdigit() for c in password):
-        raise HTTPException(400, "Password must contain at least one number.")
-
-
-def _external_session_participant(authorization: str | None):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "External login required.")
-    raw = authorization.removeprefix("Bearer ").strip()
-    th = hashlib.sha256(raw.encode()).hexdigest()
-    r = (supabase.table("external_sessions")
-         .select("session_id,participant_id,expires_at")
-         .eq("token_hash", th).limit(1).execute())
-    if not r.data:
-        raise HTTPException(401, "Invalid or expired external session.")
-    s = r.data[0]
-    if now() > parse_dt(s["expires_at"]):
-        raise HTTPException(401, "External session expired. Please log in again.")
-    p = (supabase.table("external_case_participants")
-         .select("participant_id,case_id,name,email,organization_name,organization_type,role,purpose,allowed_document_types,permission_level,status,expires_at")
-         .eq("participant_id", s["participant_id"]).limit(1).execute())
-    if not p.data:
-        raise HTTPException(401, "External account no longer exists.")
-    x = p.data[0]
-    if x.get("status") != "active":
-        raise HTTPException(403, "External access is no longer active.")
-    if x.get("expires_at") and now() > parse_dt(x["expires_at"]):
-        raise HTTPException(403, "External case access has expired.")
-    case = supabase.table("cases").select("status").eq("case_id", x["case_id"]).limit(1).execute()
-    if case.data and str(case.data[0].get("status", "")).lower() in {"closed","completed","archived"}:
-        raise HTTPException(403, "This case is closed. External access has been removed.")
-    return x
-
-
 @app.post("/case/invite-external")
 def invite_external(req: ExternalCaseInviteRequest, authorization: str | None = Header(default=None)):
     u = get_current_user(authorization)
-    if not u["is_elevated"]:
-        raise HTTPException(403, "Complete authenticator 2FA before inviting an external participant.")
+    if not u["is_elevated"]: raise HTTPException(403, "Complete authenticator 2FA before inviting an external participant.")
     inviter = membership(u["user_id"], req.case_id)
-    if inviter["permission_level"] != "grant":
-        raise HTTPException(403, "You don't have grant permission on this case.")
-    if req.organization_type not in EXTERNAL_ORGANIZATION_TYPES:
-        raise HTTPException(400, "Invalid external organization type.")
-    if req.permission_level not in {"read", "upload", "sign"}:
-        raise HTTPException(400, "Invalid external permission level.")
-    requested = set(req.allowed_document_types)
-    available = set(inviter.get("allowed_document_types") or [])
-    if not requested or not requested.issubset(available):
-        raise HTTPException(403, "You can grant only document types you are allowed to grant.")
-    if not req.name.strip() or "@" not in req.email:
-        raise HTTPException(400, "Valid external participant name and email are required.")
-    case = supabase.table("cases").select("status").eq("case_id", req.case_id).limit(1).execute()
-    if not case.data or str(case.data[0].get("status", "")).lower() in {"closed","completed","archived"}:
-        raise HTTPException(400, "External participants cannot be invited to a closed case.")
-
-    email = req.email.strip().lower()
-    existing = (supabase.table("external_case_participants")
-                .select("participant_id,status")
-                .eq("case_id", req.case_id).ilike("email", email)
-                .in_("status", ["invited","active"]).limit(1).execute())
-    if existing.data:
-        raise HTTPException(400, "This external participant already has an invitation or active access to this case.")
-
-    token = secrets.token_urlsafe(32)
-    expires = now() + timedelta(hours=max(1, min(req.expires_hours, 168)))
+    if inviter["permission_level"] != "grant": raise HTTPException(403, "You don't have grant permission on this case.")
+    if req.organization_type not in EXTERNAL_ORGANIZATION_TYPES: raise HTTPException(400, "Invalid external organization type.")
+    if req.permission_level not in {"read", "upload", "sign"}: raise HTTPException(400, "Invalid external permission level.")
+    requested = set(req.allowed_document_types); available = set(inviter.get("allowed_document_types") or [])
+    if not requested or not requested.issubset(available): raise HTTPException(403, "You can grant only document types you are allowed to grant.")
+    if not req.name.strip() or "@" not in req.email: raise HTTPException(400, "Valid external participant name and email are required.")
+    token = secrets.token_urlsafe(32); token_hash = hashlib.sha256(token.encode()).hexdigest(); expires = now() + timedelta(hours=max(1, min(req.expires_hours, 168)))
+    existing = supabase.table("external_case_participants").select("participant_id").eq("case_id", req.case_id).ilike("email", req.email.strip()).eq("status", "active").limit(1).execute()
+    if existing.data: raise HTTPException(400, "This external participant already has active access to this case.")
     created = supabase.table("external_case_participants").insert({
-        "case_id": req.case_id, "invited_by": u["user_id"], "name": req.name.strip(),
-        "email": email, "organization_name": req.organization_name.strip(),
-        "organization_type": req.organization_type, "role": req.role.strip() or "external_participant",
-        "purpose": req.purpose.strip(), "allowed_document_types": sorted(requested),
-        "permission_level": req.permission_level, "status": "invited",
-        "invitation_token_hash": hashlib.sha256(token.encode()).hexdigest(),
-        "expires_at": iso(expires), "password_hash": None,
+        "case_id": req.case_id, "invited_by": u["user_id"], "name": req.name.strip(), "email": req.email.strip(),
+        "organization_name": req.organization_name.strip(), "organization_type": req.organization_type,
+        "role": req.role.strip() or "external_participant", "purpose": req.purpose.strip(),
+        "allowed_document_types": sorted(requested), "permission_level": req.permission_level,
+        "status": "invited", "invitation_token_hash": token_hash, "expires_at": iso(expires)
     }).execute()
-    link = f"{FRONTEND_URL.rstrip('/')}/external-portal.html?token={token}"
-    send_external_invite_email(email, req.name.strip(), link, req.purpose)
-    return {"success": True, "message": f"Invitation sent to {req.name.strip()}. They will create their own password from the invitation link.", "participant_id": created.data[0]["participant_id"] if created.data else None}
+    link = f"{FRONTEND_URL}/external-portal.html?token={token}"
+    send_email(req.email.strip(), req.name.strip(), link)
+    return {"success": True, "message": f"External invitation sent to {req.name.strip()}.", "participant_id": created.data[0]["participant_id"] if created.data else None}
 
+class ExternalTokenRequest(BaseModel):
+    token: str
 
 @app.get("/external/invite")
 def external_invite(token: str):
     token_hash = hashlib.sha256(token.encode()).hexdigest()
-    r = (supabase.table("external_case_participants")
-         .select("participant_id,case_id,name,email,organization_name,organization_type,role,purpose,allowed_document_types,permission_level,status,expires_at,password_hash")
-         .eq("invitation_token_hash", token_hash).limit(1).execute())
-    if not r.data:
-        raise HTTPException(404, "Invitation not found or invalid.")
+    r = supabase.table("external_case_participants").select("participant_id,case_id,name,email,organization_name,organization_type,role,purpose,allowed_document_types,permission_level,status,expires_at").eq("invitation_token_hash", token_hash).limit(1).execute()
+    if not r.data: raise HTTPException(404, "Invitation not found or invalid.")
     x = r.data[0]
-    if x.get("status") in {"revoked", "expired", "completed"}:
-        raise HTTPException(403, f"This invitation is {x['status']}.")
+    if x.get("status") in {"revoked", "expired", "completed"}: raise HTTPException(403, f"This invitation is {x['status']}.")
     if x.get("expires_at") and now() > parse_dt(x["expires_at"]):
         supabase.table("external_case_participants").update({"status":"expired"}).eq("participant_id", x["participant_id"]).execute()
         raise HTTPException(403, "This invitation has expired.")
-    case = supabase.table("cases").select("status").eq("case_id", x["case_id"]).limit(1).execute()
-    if case.data and str(case.data[0].get("status", "")).lower() in {"closed","completed","archived"}:
-        raise HTTPException(403, "This case is closed and external access has been removed.")
-    return {**{k:x.get(k) for k in ["participant_id","case_id","name","email","organization_name","organization_type","role","purpose","allowed_document_types","permission_level","status","expires_at"]}, "password_set": bool(x.get("password_hash"))}
-
+    return {k:x.get(k) for k in ["participant_id","case_id","name","email","organization_name","organization_type","role","purpose","allowed_document_types","permission_level","status","expires_at"]}
 
 @app.post("/external/accept")
-def external_accept(req: ExternalAcceptRequest):
-    _validate_external_password(req.password)
+def external_accept(req: ExternalTokenRequest):
     token_hash = hashlib.sha256(req.token.encode()).hexdigest()
-    r = (supabase.table("external_case_participants")
-         .select("participant_id,status,expires_at,password_hash")
-         .eq("invitation_token_hash", token_hash).limit(1).execute())
-    if not r.data:
-        raise HTTPException(404, "Invitation not found.")
-    x = r.data[0]
-    if x.get("expires_at") and now() > parse_dt(x["expires_at"]):
-        raise HTTPException(403, "This invitation has expired.")
-    if x["status"] != "invited" or x.get("password_hash"):
-        raise HTTPException(400, "This invitation has already been activated. Use External Login with your email and password.")
-    password_hash = bcrypt.hashpw(req.password.encode(), bcrypt.gensalt()).decode()
-    supabase.table("external_case_participants").update({
-        "password_hash": password_hash, "password_set_at": iso(now()),
-        "status": "active", "accepted_at": iso(now()), "last_login_at": iso(now()),
-    }).eq("participant_id", x["participant_id"]).execute()
-    return {"success": True, "message": "Password created. You can now log in with your email and password."}
-
-
-@app.post("/external/login")
-def external_login(req: ExternalLoginRequest):
-    email = req.email.strip().lower()
-    if not email or not req.password:
-        raise HTTPException(400, "Email and password are required.")
-    rows = (supabase.table("external_case_participants")
-            .select("participant_id,case_id,password_hash,status,expires_at,name,email,organization_name,organization_type,role,permission_level,allowed_document_types")
-            .ilike("email", email).eq("status", "active").limit(20).execute().data or [])
-    match = None
-    for row in rows:
-        if row.get("expires_at") and now() > parse_dt(row["expires_at"]):
-            continue
-        stored = row.get("password_hash")
-        if stored and bcrypt.checkpw(req.password.encode(), stored.encode()):
-            match = row
-            break
-    if not match:
-        raise HTTPException(401, "Invalid external email or password.")
-    case = supabase.table("cases").select("status").eq("case_id", match["case_id"]).limit(1).execute()
-    if case.data and str(case.data[0].get("status", "")).lower() in {"closed","completed","archived"}:
-        raise HTTPException(403, "This case is closed. External access has been removed.")
-    raw = secrets.token_urlsafe(32)
-    supabase.table("external_sessions").insert({
-        "participant_id": match["participant_id"], "token_hash": hashlib.sha256(raw.encode()).hexdigest(),
-        "expires_at": iso(now() + timedelta(hours=8)),
-    }).execute()
-    supabase.table("external_case_participants").update({"last_login_at": iso(now())}).eq("participant_id", match["participant_id"]).execute()
-    return {"token": raw, "expires_in_hours": 8, "participant": {k:match.get(k) for k in ["participant_id","case_id","name","email","organization_name","organization_type","role","permission_level","allowed_document_types"]}}
-
-
-@app.get("/external/me")
-def external_me(authorization: str | None = Header(default=None)):
-    return _external_session_participant(authorization)
-
-
-@app.get("/external/documents")
-def external_documents(authorization: str | None = Header(default=None)):
-    p = _external_session_participant(authorization)
-    allowed = set(p.get("allowed_document_types") or [])
-    docs = (supabase.table("documents")
-            .select("document_id,case_id,document_type,file_type,current_version_id")
-            .eq("case_id", p["case_id"]).execute().data or [])
-    out = []
-    for d in docs:
-        if d["document_type"] not in allowed or not d.get("current_version_id"):
-            continue
-        v = (supabase.table("document_versions")
-             .select("version_id,version_number,storage_path,timestamp")
-             .eq("version_id", d["current_version_id"]).limit(1).execute())
-        if not v.data:
-            continue
-        out.append({
-            "document_id": d["document_id"], "document_type": d["document_type"],
-            "file_type": d["file_type"], "version_id": v.data[0]["version_id"],
-            "version_number": v.data[0].get("version_number"),
-            "filename": Path(v.data[0]["storage_path"]).name, "timestamp": v.data[0].get("timestamp"),
-        })
-    return {"case_id": p["case_id"], "documents": out}
-
-
-@app.get("/external/documents/file/{version_id}")
-def external_document_file(version_id: str, authorization: str | None = Header(default=None)):
-    p = _external_session_participant(authorization)
-    allowed = set(p.get("allowed_document_types") or [])
-    vr = supabase.table("document_versions").select("version_id,document_id,storage_path").eq("version_id", version_id).limit(1).execute()
-    if not vr.data:
-        raise HTTPException(404, "Document version not found.")
-    d = supabase.table("documents").select("case_id,document_type").eq("document_id", vr.data[0]["document_id"]).limit(1).execute()
-    if not d.data or d.data[0]["case_id"] != p["case_id"] or d.data[0]["document_type"] not in allowed:
-        raise HTTPException(403, "You are not authorized to view this document.")
-    integrity = _verify_version_integrity_internal(version_id)
-    if not integrity.get("valid"):
-        raise HTTPException(409, "Document integrity verification failed.")
-    signed = supabase.storage.from_(DOCUMENT_BUCKET).create_signed_url(vr.data[0]["storage_path"], 120)
-    url = signed.get("signedURL") or signed.get("signedUrl") or signed.get("signed_url")
-    if not url:
-        raise HTTPException(500, "Could not create secure document URL.")
-    return {"url": url, "expires_in": 120, "integrity": integrity}
-
+    r = supabase.table("external_case_participants").select("participant_id,status,expires_at").eq("invitation_token_hash", token_hash).limit(1).execute()
+    if not r.data: raise HTTPException(404, "Invitation not found.")
+    x=r.data[0]
+    if x.get("expires_at") and now() > parse_dt(x["expires_at"]): raise HTTPException(403,"This invitation has expired.")
+    if x["status"] not in {"invited","active"}: raise HTTPException(403,"This invitation is no longer active.")
+    supabase.table("external_case_participants").update({"status":"active","accepted_at":iso(now())}).eq("participant_id",x["participant_id"]).execute()
+    return {"success":True,"participant_id":x["participant_id"],"token":req.token}
 
 @app.post("/external/documents/upload")
-async def external_upload(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    document_type: str = Form(...),
-    authorization: str | None = Header(default=None),
-):
-    p = _external_session_participant(authorization)
-    if p["permission_level"] not in {"upload", "sign"}:
-        raise HTTPException(403, "This external participant cannot upload documents.")
-    document_type = document_type.strip().lower()
-    if document_type not in set(p.get("allowed_document_types") or []):
-        raise HTTPException(403, "This document type is not allowed for your case access.")
-    if not file.filename:
-        raise HTTPException(400, "Filename missing.")
-    data = await file.read()
-    if not data or len(data) > MAX_FILE_SIZE:
-        raise HTTPException(400, "Invalid or oversized file.")
-    ext = Path(file.filename).suffix.lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(400, "Unsupported file type.")
-    h = calculate_file_hash(data)
-    existing = (supabase.table("documents")
-                .select("document_id,current_version_id,file_type")
-                .eq("case_id", p["case_id"]).eq("document_type", document_type).limit(1).execute())
+async def external_upload(token: str = Form(...), file: UploadFile = File(...), document_type: str = Form(...)):
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    pr = supabase.table("external_case_participants").select("participant_id,case_id,allowed_document_types,permission_level,status,expires_at").eq("invitation_token_hash", token_hash).limit(1).execute()
+    if not pr.data: raise HTTPException(401,"Invalid external access token.")
+    p=pr.data[0]
+    if p["status"] != "active": raise HTTPException(403,"External access is not active.")
+    if p.get("expires_at") and now() > parse_dt(p["expires_at"]): raise HTTPException(403,"External access has expired.")
+    if p["permission_level"] not in {"upload","sign"}: raise HTTPException(403,"This external participant cannot upload.")
+    document_type=document_type.strip().lower()
+    if document_type not in set(p.get("allowed_document_types") or []): raise HTTPException(403,"This document type is not allowed.")
+    if not file.filename: raise HTTPException(400,"Filename missing.")
+    data=await file.read()
+    if not data or len(data)>MAX_FILE_SIZE: raise HTTPException(400,"Invalid or oversized file.")
+    ext=Path(file.filename).suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS: raise HTTPException(400,"Unsupported file type.")
+    h=calculate_file_hash(data)
+    # External submissions are attributable to the participant. For this prototype they are integrity-hashed and stored;
+    # an internal signing identity can be added when the external organization has a managed account.
+    existing=supabase.table("documents").select("document_id,current_version_id,file_type").eq("case_id",p["case_id"]).eq("document_type",document_type).limit(1).execute()
     if existing.data:
-        did = existing.data[0]["document_id"]
-        latest = (supabase.table("document_versions")
-                  .select("version_number,file_hash")
-                  .eq("document_id", did).order("version_number", desc=True).limit(1).execute())
-        lv = latest.data[0] if latest.data else None
-        vn = int(lv.get("version_number") or 1) + 1 if lv else 1
-        prev = lv.get("file_hash") if lv else None
+        did=existing.data[0]["document_id"]
+        latest=supabase.table("document_versions").select("version_number,file_hash").eq("document_id",did).order("version_number",desc=True).limit(1).execute()
+        lv=latest.data[0] if latest.data else None; vn=int(lv.get("version_number") or 1)+1 if lv else 1; prev=lv.get("file_hash") if lv else None
     else:
-        dr = supabase.table("documents").insert({
-            "case_id": p["case_id"], "document_type": document_type,
-            "file_type": "image" if ext in {".jpg",".jpeg",".png"} else ("pdf" if ext == ".pdf" else "text"),
-            "uploader_id": None,
-        }).execute()
-        if not dr.data:
-            raise HTTPException(500, "Could not create document record.")
-        did = dr.data[0]["document_id"]; vn = 1; prev = None
-    vid = str(uuid.uuid4())
-    safe = os.path.basename(file.filename).replace("/", "_").replace("\\", "_")
-    path = f"{p['case_id']}/{did}/v{vn}/{vid}_{safe}"
-    ctype = file.content_type or mimetypes.guess_type(file.filename)[0] or "application/octet-stream"
-    supabase.storage.from_(DOCUMENT_BUCKET).upload(path, data, {"content-type": ctype, "upsert": False})
-    supabase.table("document_versions").insert({
-        "version_id": vid, "document_id": did, "storage_path": path, "file_hash": h,
-        "previous_version_hash": prev, "version_number": vn, "signing_key_id": None,
-        "signature": "EXTERNAL_HASH_ONLY", "co_signature": None, "uploader_id": None, "timestamp": iso(now()),
-    }).execute()
-    supabase.table("documents").update({"current_version_id": vid}).eq("document_id", did).execute()
-    if _case_ai_enabled(p["case_id"]):
-        queued = _queue_ai_job(vid)
-        if queued:
-            background_tasks.add_task(_process_ai_job, vid)
-    return {"success": True, "message": f"Uploaded as Version {vn}.", "version_number": vn, "version_id": vid, "document_id": did}
+        dr=supabase.table("documents").insert({"case_id":p["case_id"],"document_type":document_type,"file_type":"image" if ext in {".jpg",".jpeg",".png"} else "text","uploader_id":None}).execute()
+        if not dr.data: raise HTTPException(500,"Could not create document.")
+        did=dr.data[0]["document_id"]; vn=1; prev=None
+    vid=str(uuid.uuid4()); safe=os.path.basename(file.filename).replace("/","_").replace("\\","_"); path=f"{p['case_id']}/{did}/v{vn}/{vid}_{safe}"
+    ctype=file.content_type or mimetypes.guess_type(file.filename)[0] or "application/octet-stream"
+    supabase.storage.from_(DOCUMENT_BUCKET).upload(path,data,{"content-type":ctype,"upsert":False})
+    supabase.table("document_versions").insert({"version_id":vid,"document_id":did,"storage_path":path,"file_hash":h,"previous_version_hash":prev,"version_number":vn,"signing_key_id":None,"signature":"EXTERNAL_HASH_ONLY","co_signature":None,"uploader_id":None,"timestamp":iso(now())}).execute()
+    supabase.table("documents").update({"current_version_id":vid}).eq("document_id",did).execute()
+    return {"success":True,"message":f"Uploaded as Version {vn}.","version_number":vn,"document_id":did,"version_id":vid,"file_hash":h}
 
-
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("invite_backend:app", host="127.0.0.1", port=8000, reload=True)
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

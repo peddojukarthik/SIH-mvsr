@@ -1,0 +1,30 @@
+Replace only the existing <header>...</header> in homepage.html with:
+
+<header>
+  <div>
+    <b id="full-name">Loading…</b>
+    <div class="meta" id="dept-name"></div>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px">
+    <a class="analytics-btn" href="analytics.html">📊 Analytics</a>
+    <button onclick="openNotifications()">🔔 <span id="count">0</span></button>
+  </div>
+</header>
+
+And add this inside the existing <style>:
+
+.analytics-btn{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding:9px 13px;
+  border-radius:8px;
+  background:#0f766e;
+  color:#fff;
+  text-decoration:none;
+  font-weight:650;
+  font-size:13px;
+}
+.analytics-btn:hover{background:#115e59}
+
+No JavaScript change is required for the Analytics button.

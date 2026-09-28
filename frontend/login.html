@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Secure DMS — Sign In</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --accent:#3158d8;--accent2:#203c9f;--soft:#eef2ff;--deep:#0e1838;
+  --ink:#172033;--muted:#68738a;--line:#dce3ef;--panel:#f7f8fc;
+}
+*{box-sizing:border-box}
+html,body{min-height:100%}
+body{
+  margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+  padding:28px;font-family:'Manrope',system-ui,sans-serif;color:var(--ink);overflow:auto;
+  background:
+    radial-gradient(circle at 7% 8%,rgba(255,255,255,.82),transparent 28%),
+    radial-gradient(circle at 94% 88%,rgba(91,120,239,.25),transparent 34%),
+    linear-gradient(135deg,#dfe5f3 0%,#18265a 52%,#314da9 100%);
+}
+body:before{
+  content:"";position:fixed;inset:0;pointer-events:none;
+  background:linear-gradient(120deg,transparent 30%,rgba(255,255,255,.055) 50%,transparent 70%);
+}
+.watermark{
+  position:fixed;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;
+  font-family:'Space Grotesk',sans-serif;font-size:clamp(110px,22vw,310px);font-weight:700;
+  letter-spacing:-12px;color:#fff;opacity:.035;user-select:none;
+}
+.shell{
+  width:min(1180px,96vw);min-height:650px;display:grid;grid-template-columns:1.06fr .94fr;
+  position:relative;z-index:1;overflow:hidden;border-radius:32px;
+  background:rgba(255,255,255,.93);border:1px solid rgba(255,255,255,.72);
+  box-shadow:0 35px 100px rgba(8,17,48,.30);backdrop-filter:blur(18px);
+}
+.brand{
+  position:relative;overflow:hidden;display:flex;flex-direction:column;justify-content:center;
+  padding:54px 60px;background:linear-gradient(150deg,#101b3e 0%,#1b347d 52%,#3158d8 100%);color:#fff;
+}
+.brand:before,.brand:after{
+  content:"";position:absolute;border:1px solid rgba(255,255,255,.10);border-radius:50%;pointer-events:none;
+}
+.brand:before{width:570px;height:570px;left:-270px;bottom:-300px}
+.brand:after{width:490px;height:490px;right:-250px;top:-250px}
+.brand-glow{position:absolute;width:330px;height:330px;right:-100px;bottom:-120px;border-radius:50%;background:rgba(98,127,255,.22);filter:blur(8px)}
+.brand-content{position:relative;z-index:2;max-width:590px}
+.logo-wrap{
+  width:250px;height:250px;margin:0 0 22px;display:flex;align-items:center;justify-content:center;
+}
+.logo-wrap img{
+  width:250px;height:250px;object-fit:contain;display:block;
+  filter:drop-shadow(0 18px 25px rgba(0,0,0,.28));
+}
+.kicker{
+  margin:0 0 13px;font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.4;
+  letter-spacing:.16em;text-transform:uppercase;color:rgba(255,255,255,.72);
+}
+.brand h1{
+  margin:0;font-family:'Space Grotesk',sans-serif;font-size:clamp(38px,4.2vw,58px);line-height:.98;
+  letter-spacing:-2.6px;font-weight:700;max-width:570px;
+}
+.brand h1 span{font-family:'DM Serif Display',Georgia,serif;font-weight:400;font-style:italic;letter-spacing:-1px;color:#e7ecff}
+.brand p{
+  margin:22px 0 0;max-width:565px;font-size:15px;line-height:1.8;color:rgba(255,255,255,.79);font-weight:500;
+}
+.badges{display:flex;flex-wrap:wrap;gap:9px;margin-top:28px}
+.badge{
+  padding:9px 13px;border:1px solid rgba(255,255,255,.20);border-radius:999px;
+  background:rgba(255,255,255,.07);font-size:11px;font-weight:700;color:rgba(255,255,255,.9);
+}
+.login{display:flex;align-items:center;justify-content:center;padding:58px 58px;background:rgba(248,249,252,.96)}
+.form{width:min(410px,100%)}
+.eyebrow{
+  margin-bottom:9px;color:var(--accent);font-family:'IBM Plex Mono',monospace;font-size:11px;
+  letter-spacing:.14em;text-transform:uppercase;font-weight:500;
+}
+h2{margin:0 0 9px;font-family:'Space Grotesk',sans-serif;font-size:38px;line-height:1.08;letter-spacing:-1.5px}
+.intro{margin:0 0 30px;color:#6a7489;font-size:14px;line-height:1.65;max-width:390px}
+label{display:block;margin:16px 0 7px;font-family:'Space Grotesk',sans-serif;font-size:12px;font-weight:700;color:#273249;letter-spacing:.01em}
+input{
+  width:100%;height:55px;padding:0 16px;border:1px solid #d4dce9;border-radius:14px;
+  background:#fff;color:var(--ink);font:500 14px 'Manrope',sans-serif;outline:none;transition:.18s;
+}
+input::placeholder{color:#8b93a1}
+input:focus{border-color:var(--accent);box-shadow:0 0 0 4px color-mix(in srgb,var(--accent) 11%,transparent);background:#fff}
+button{
+  width:100%;height:55px;margin-top:20px;border:0;border-radius:14px;background:linear-gradient(135deg,var(--accent),var(--accent2));
+  color:#fff;font:700 14px 'Manrope',sans-serif;cursor:pointer;box-shadow:0 12px 26px color-mix(in srgb,var(--accent) 24%,transparent);transition:.18s;
+}
+button:hover{transform:translateY(-1px);box-shadow:0 16px 30px color-mix(in srgb,var(--accent) 28%,transparent)}
+button:disabled{opacity:.65;cursor:not-allowed;transform:none}
+.forgot{
+  display:block;text-align:right;margin:10px 1px 0;color:var(--accent);font:700 12px 'Manrope',sans-serif;text-decoration:none;cursor:pointer
+}
+.forgot:hover{text-decoration:underline}
+.status{margin-top:15px;padding:12px 13px;border-radius:11px;font-size:12px;line-height:1.5;display:none}
+.status.error{display:block;background:#fff1f2;color:#991b1b;border:1px solid #ffd3d8}
+.status.success{display:block;background:#ecfdf5;color:#065f46;border:1px solid #c8f0dc}
+.reset{display:none}.reset.active{display:block}
+.reset h3{margin:0 0 6px;font-family:'Space Grotesk',sans-serif;font-size:24px}
+.reset-copy{margin:0 0 18px;color:#6a7489;font-size:12px;line-height:1.55}
+.back{border:1px solid #d5dce7;background:#fff;color:#334155;margin-top:9px;box-shadow:none}
+.back:hover{background:#f8fafc;box-shadow:none}
+.secure-note{
+  display:flex;gap:8px;justify-content:center;align-items:center;margin-top:23px;padding-top:18px;border-top:1px solid #e3e7ee;
+  color:#8a94a6;font-size:11px;line-height:1.5;text-align:center;
+}
+.secure-note::before{content:"◆";font-size:7px;color:var(--accent)}
+.footer{margin-top:15px;text-align:center;color:#9aa3b4;font-size:10px;font-family:'IBM Plex Mono',monospace;letter-spacing:.03em}
+.hidden{display:none!important}
+@media(max-width:850px){
+  body{padding:14px;align-items:flex-start}.shell{grid-template-columns:1fr;min-height:auto;margin:20px 0}
+  .brand{padding:40px 30px 36px;text-align:center;align-items:center}.brand-content{max-width:650px}
+  .logo-wrap,.logo-wrap img{width:185px;height:185px}.brand h1{font-size:39px}.brand p{font-size:13px}.badges{justify-content:center}
+  .login{padding:38px 28px 44px}.form{max-width:450px}
+}
+@media(max-width:520px){.brand h1{font-size:32px;letter-spacing:-1.5px}.brand p{line-height:1.6}.logo-wrap,.logo-wrap img{width:150px;height:150px}.login{padding:32px 21px 38px}h2{font-size:31px}.shell{border-radius:24px}}
+</style>
+</head>
+<body>
+<div class="watermark" id="watermark">DMS</div>
+
+<main class="shell">
+  <section class="brand" aria-label="Secure DMS identity">
+    <div class="brand-glow"></div>
+    <div class="brand-content">
+      <div class="logo-wrap">
+        <img src="department-emblem.png" alt="Secure DMS department emblem">
+      </div>
+      <p class="kicker">Secure Digital Document Management</p>
+      <h1>One secure <span>workspace</span><br>for every case.</h1>
+      <p>Controlled access, immutable documents, cryptographic integrity and case-grounded AI — built around the investigation, not around the department.</p>
+      <div class="badges">
+        <span class="badge">Case-scoped access</span>
+        <span class="badge">SHA-256 integrity</span>
+        <span class="badge">Digital signatures</span>
+        <span class="badge">AI-assisted extraction</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="login">
+    <div class="form">
+      <section id="loginSection">
+        <div class="eyebrow">Authorized access</div>
+        <h2>Welcome back</h2>
+        <p class="intro">Sign in with your official employee credentials. Your workspace theme and tools will adapt to your department after login.</p>
+
+        <label for="employee-id">Employee ID</label>
+        <input id="employee-id" autocomplete="username" placeholder="e.g. SEC-PS-HEAD-001">
+
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="current-password" placeholder="Enter your password">
+
+        <a class="forgot" onclick="showReset()">Forgot password?</a>
+        <button id="loginBtn" onclick="login()">Sign in securely</button>
+        <div id="loginStatus" class="status"></div>
+        <div class="secure-note">Authorized users only · Secure DMS</div>
+      </section>
+
+      <section id="resetSection" class="reset">
+        <div class="eyebrow">Account recovery</div>
+        <h3>Reset your password</h3>
+        <p class="reset-copy">We'll send a verification code to your registered official email.</p>
+
+        <div id="resetStep1">
+          <label for="resetEmployee">Employee ID</label>
+          <input id="resetEmployee" autocomplete="username" placeholder="Enter your employee ID">
+          <button id="sendResetBtn" onclick="requestReset()">Send verification code</button>
+        </div>
+
+        <div id="resetStep2" class="hidden">
+          <label for="resetOtp">Verification code</label>
+          <input id="resetOtp" inputmode="numeric" maxlength="6" placeholder="6-digit code">
+
+          <label for="newPassword">New password</label>
+          <input id="newPassword" type="password" autocomplete="new-password" placeholder="At least 8 characters">
+
+          <label for="confirmPassword">Confirm password</label>
+          <input id="confirmPassword" type="password" autocomplete="new-password" placeholder="Re-enter new password">
+
+          <button id="resetBtn" onclick="resetPassword()">Set new password</button>
+        </div>
+
+        <div id="resetStatus" class="status"></div>
+        <button class="back" onclick="showLogin()">Back to sign in</button>
+      </section>
+    </div>
+  </section>
+</main>
+
+<script>
+const API = location.hostname === "localhost" || location.hostname === "127.0.0.1"
+  ? "http://127.0.0.1:8000"
+  : "https://alliance-cqnf.onrender.com";
+
+const colors = {
+  police:["#3158d8","#203c9f"],
+  fsl:["#7651c9","#482486"],
+  forensic:["#7651c9","#482486"],
+  hospital_forensic_medicine:["#087f73","#07554e"],
+  government_hospital:["#087f73","#07554e"],
+  private_hospital:["#087f73","#07554e"],
+  medical:["#087f73","#07554e"],
+  court:["#a86b1c","#6f430f"],
+  prosecution:["#59677d","#263247"],
+  legal:["#a86b1c","#6f430f"]
+};
+
+function setTheme(type,name){
+  const c=colors[type]||["#3158d8","#203c9f"];
+  document.documentElement.style.setProperty("--accent",c[0]);
+  document.documentElement.style.setProperty("--accent2",c[1]);
+  if(type){
+    document.getElementById("watermark").textContent=
+      type.includes("hospital")||type==="medical" ? "MED" :
+      type==="fsl"||type==="forensic" ? "FSL" :
+      type==="court" ? "COURT" :
+      type==="prosecution"||type==="legal" ? "LEGAL" : "POLICE";
+  }
+}
+
+function showStatus(id,msg,ok=false){
+  const el=document.getElementById(id);el.textContent=msg;el.className="status "+(ok?"success":"error");
+}
+function showLogin(){
+  document.getElementById("loginSection").classList.remove("hidden");
+  document.getElementById("resetSection").classList.remove("active");
+  document.getElementById("resetStatus").className="status";
+}
+function showReset(){
+  document.getElementById("loginSection").classList.add("hidden");
+  document.getElementById("resetSection").classList.add("active");
+  document.getElementById("resetEmployee").value=document.getElementById("employee-id").value.trim();
+  document.getElementById("resetStatus").className="status";
+}
+async function login(){
+  const employee_id=document.getElementById("employee-id").value.trim();
+  const password=document.getElementById("password").value;
+  const btn=document.getElementById("loginBtn");
+  if(!employee_id||!password){showStatus("loginStatus","Employee ID and password are required.");return}
+  btn.disabled=true;btn.textContent="Signing in…";
+  try{
+    const r=await fetch(API+"/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({employee_id,password})});
+    const d=await r.json().catch(()=>({detail:"Unexpected server response."}));
+    if(!r.ok)throw new Error(d.detail||"Invalid employee ID or password.");
+    sessionStorage.setItem("token",d.token);
+    sessionStorage.setItem("full_name",d.full_name||"");
+    sessionStorage.setItem("department_type",d.department_type||"");
+    sessionStorage.setItem("department_name",d.department_name||"");
+    sessionStorage.setItem("is_admin",String(!!d.is_admin));
+    sessionStorage.setItem("has_2fa",String(!!d.has_2fa));
+    const p=new URLSearchParams(location.search),redirectTo=p.get("redirect");
+    if(d.account_status==="activated"||d.account_status==="profile_pending")location.href="profile-setup.html";
+    else location.href=redirectTo?decodeURIComponent(redirectTo):"homepage.html";
+  }catch(e){showStatus("loginStatus",e.message)}
+  finally{btn.disabled=false;btn.textContent="Sign in securely"}
+}
+async function requestReset(){
+  const employee_id=document.getElementById("resetEmployee").value.trim();
+  const btn=document.getElementById("sendResetBtn");
+  if(!employee_id){showStatus("resetStatus","Enter your employee ID.");return}
+  btn.disabled=true;btn.textContent="Sending…";
+  try{
+    const r=await fetch(API+"/password-reset/request",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({employee_id})});
+    const d=await r.json().catch(()=>({detail:"Unexpected server response."}));
+    if(!r.ok)throw new Error(d.detail||"Unable to request password reset.");
+    document.getElementById("resetStep2").classList.remove("hidden");
+    showStatus("resetStatus",d.message||"Verification code sent to your official email.",true);
+  }catch(e){showStatus("resetStatus",e.message)}
+  finally{btn.disabled=false;btn.textContent="Send verification code"}
+}
+async function resetPassword(){
+  const employee_id=document.getElementById("resetEmployee").value.trim();
+  const otp=document.getElementById("resetOtp").value.trim();
+  const password=document.getElementById("newPassword").value;
+  const confirm=document.getElementById("confirmPassword").value;
+  if(!otp||otp.length!==6){showStatus("resetStatus","Enter the 6-digit verification code.");return}
+  if(password.length<8){showStatus("resetStatus","Password must be at least 8 characters.");return}
+  if(password!==confirm){showStatus("resetStatus","Passwords do not match.");return}
+  const btn=document.getElementById("resetBtn");btn.disabled=true;btn.textContent="Updating…";
+  try{
+    const r=await fetch(API+"/password-reset/confirm",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({employee_id,otp,new_password:password})});
+    const d=await r.json().catch(()=>({detail:"Unexpected server response."}));
+    if(!r.ok)throw new Error(d.detail||"Password reset failed.");
+    showStatus("resetStatus","Password updated successfully. You can now sign in.",true);
+    document.getElementById("newPassword").value="";document.getElementById("confirmPassword").value="";document.getElementById("resetOtp").value="";
+  }catch(e){showStatus("resetStatus",e.message)}
+  finally{btn.disabled=false;btn.textContent="Set new password"}
+}
+setTheme(sessionStorage.getItem("department_type"),sessionStorage.getItem("department_name"));
+document.addEventListener("keydown",e=>{if(e.key==="Enter"&&!document.getElementById("resetSection").classList.contains("active"))login()});
+</script>
+</body>
+</html>

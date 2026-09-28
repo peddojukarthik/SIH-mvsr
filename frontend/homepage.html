@@ -19,27 +19,13 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:-2;bac
 .brand .emblem,.brand .mark{background:linear-gradient(145deg,#ffffff20,#ffffff08);backdrop-filter:blur(8px)}
 .brand .emblem::after,.brand .mark::after{content:"";position:absolute;inset:4px;border:1px solid #ffffff35;border-radius:inherit;pointer-events:none}
 @media(max-width:700px){body::before{width:380px;height:380px;right:-100px;bottom:-70px;opacity:.065}}
-.analytics-btn{
-  display:inline-flex;
-  align-items:center;
-  gap:6px;
-  margin-right:8px;
-  padding:9px 13px;
-  border-radius:8px;
-  background:#0f766e;
-  color:#fff;
-  text-decoration:none;
-  font-weight:650;
-  font-size:13px;
-}
-.analytics-btn:hover{background:#115e59}
 </style>
 </head>
 <body id="appBody">
 <div class="shell">
 <header class="topbar">
  <div class="brand"><div class="emblem" id="emblem">◈</div><div><div class="eyebrow">Secure Digital Document Management</div><h1 id="deptTitle">Command Center</h1><div id="deptSubtitle" style="font-size:13px;opacity:.82">Case-scoped secure workspace</div></div></div>
- <div class="userbox"><strong id="userName">User</strong><span id="userRole">Secure session</span><div class="actions"><button class="btn ghost" id="refreshBtn">↻ Refresh</button><button class="btn ghost" id="logoutBtn">Log out</button></div></div>
+ <div class="userbox"><strong id="userName">User</strong><span id="userRole">Secure session</span><div class="actions"><button class="btn ghost" id="analyticsBtn">📊 Analytics</button><button class="btn ghost" id="refreshBtn">↻ Refresh</button><button class="btn ghost" id="logoutBtn">Log out</button></div></div>
 </header>
 <div class="mini"><div class="stat"><b id="openCount">0</b><span>Open cases</span></div><div class="stat"><b id="pendingCount">0</b><span>Pending AI jobs</span></div><div class="stat"><b id="unreadCount">0</b><span>Unread notifications</span></div></div>
 <div class="grid">
@@ -50,8 +36,6 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:-2;bac
  <aside>
   <section class="card" id="inviteCard"><div class="section-head"><div><h2>Invite Employee</h2><div class="sub">Available to authorized department administrators.</div></div><span class="pill">Protected</span></div><input class="search" id="employeeSearch" placeholder="Search employee name…"><div id="employeeResults"></div><div id="inviteStatus"></div></section>
   <section class="card" style="margin-top:18px"><div class="section-head"><div><h2>Notifications</h2><div class="sub">Recent activity for your account.</div></div><button class="btn small" id="readBtn">Mark read</button></div><div id="notifications"><div class="empty">Loading…</div></div></section>
-  <a class="analytics-btn" href="analytics.html">📊 Analytics</a>
-
  </aside>
 </div>
 <div class="footer">Secure DMS · Case-scoped access · Cryptographic integrity · AI-assisted document intelligence</div>
@@ -79,6 +63,6 @@ let pendingAction=null,pendingPurpose=null;async function requestOtp(purpose,act
 $('verifyOtp').onclick=async()=>{try{await api('/security/verify-otp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({purpose:pendingPurpose,code:$('otpCode').value.trim()})});$('otpModal').style.display='none';if(pendingAction)await pendingAction();}catch(e){$('otpError').innerHTML='<div class="notice error">'+esc(e.message)+'</div>';}};$('cancelOtp').onclick=()=>$('otpModal').style.display='none';
 let closingCaseId=null;$('closeCancel').onclick=()=>$('closeModal').style.display='none';function openClose(id){closingCaseId=id;$('closureFile').value='';$('closeStatus').innerHTML='';$('closeModal').style.display='flex';}
 $('closeConfirm').onclick=async()=>{const f=$('closureFile').files[0];if(!f){$('closeStatus').innerHTML='<div class="notice error">Please provide the official closure/disposal document first.</div>';return}const btn=$('closeConfirm');btn.disabled=true;try{await requestOtp('MANAGE_MEMBERS',async()=>{const fd=new FormData();fd.append('case_id',closingCaseId);fd.append('document_type','evidence');fd.append('file',f);$('closeStatus').innerHTML='<div class="notice info">Securing the closure document…</div>';await api('/documents/upload',{method:'POST',body:fd});const d=await api('/case/close',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({case_id:closingCaseId})});$('closeStatus').innerHTML='<div class="notice success">'+esc(d.message||'Case closed.')+'</div>';setTimeout(()=>{$('closeModal').style.display='none';loadCases()},900);});}catch(e){$('closeStatus').innerHTML='<div class="notice error">'+esc(e.message)+'</div>';}finally{btn.disabled=false;}};
-$('newFirBtn').onclick=()=>location.href='file-fir.html';$('refreshBtn').onclick=()=>{loadCases();loadNotifications()};$('logoutBtn').onclick=()=>{sessionStorage.clear();location.href='login.html'};loadCases();loadNotifications();
+$('newFirBtn').onclick=()=>location.href='file-fir.html';$('analyticsBtn').onclick=()=>location.href='analytics.html';$('refreshBtn').onclick=()=>{loadCases();loadNotifications()};$('logoutBtn').onclick=()=>{sessionStorage.clear();location.href='login.html'};loadCases();loadNotifications();
 </script>
 </body></html>

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Analytics | Secure DMS</title>
+<style>
+:root{--p:#2454c6;--pd:#10244f;--text:#17233b;--muted:#66789a;--line:#dce5f5;--bg:#eef4ff}
+*{box-sizing:border-box}body{margin:0;font-family:Inter,system-ui,sans-serif;color:var(--text);background:radial-gradient(circle at 10% 10%,#4d7ef326,transparent 30%),var(--bg)}
+body:before{content:"";position:fixed;z-index:0;left:50%;top:52%;width:min(650px,72vw);height:min(650px,72vw);transform:translate(-50%,-50%);background:url("department-emblem.png") center/contain no-repeat;opacity:.055;pointer-events:none}
+body.forensic{--p:#7047b8;--pd:#35215e}body.medical{--p:#008d91;--pd:#064f55}body.legal{--p:#9b6b18;--pd:#4d3610}
+.page{position:relative;z-index:1;width:min(1400px,94vw);margin:auto;padding:24px 0 50px}
+header{padding:26px 30px;border-radius:25px;color:#fff;background:linear-gradient(115deg,var(--pd),var(--p));display:flex;justify-content:space-between;align-items:center;gap:20px;box-shadow:0 20px 45px #1832642e}
+.brand{display:flex;gap:16px;align-items:center}.brand img{width:62px;height:62px;object-fit:contain}.ey{font-size:11px;letter-spacing:2px;opacity:.75;text-transform:uppercase}h1{margin:4px 0;font-size:30px}.sub{margin:0;opacity:.82}.actions{display:flex;gap:10px}.btn{padding:10px 15px;border:1px solid #ffffff40;border-radius:11px;background:#ffffff18;color:#fff;text-decoration:none;font-weight:700;cursor:pointer}
+.filters{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:18px 0;flex-wrap:wrap}select{padding:10px 13px;border:1px solid var(--line);border-radius:11px;background:#fff;font-weight:600}.updated{font-size:12px;color:var(--muted)}
+.grid{display:grid;gap:16px}.summary{grid-template-columns:repeat(5,1fr)}.two{grid-template-columns:1.15fr .85fr}.three{grid-template-columns:repeat(3,1fr)}
+.card{background:#fffffff0;border:1px solid var(--line);border-radius:19px;padding:21px;box-shadow:0 12px 30px #223d7012}.metric{min-height:120px}.ico{font-size:23px;margin-bottom:11px}.value{font-size:31px;font-weight:800}.label{margin-top:8px;color:var(--muted);font-size:13px}.note{margin-top:10px;padding:11px 13px;border-radius:11px;background:#f2f6ff;color:#52698e;font-size:12px}
+h2{margin:0 0 5px;font-size:18px}.cs{margin:0 0 17px;color:var(--muted);font-size:13px}.bars{display:grid;gap:13px}.bar{display:grid;grid-template-columns:135px 1fr 35px;gap:9px;align-items:center;font-size:13px}.track{height:10px;border-radius:99px;background:#edf2fa;overflow:hidden}.fill{height:100%;border-radius:99px;background:linear-gradient(90deg,var(--p),#5d87ee)}
+.row{display:grid;grid-template-columns:1fr auto;padding:11px 0;border-bottom:1px solid #edf1f7}.row:last-child{border:0}.badge{padding:5px 9px;border-radius:99px;font-size:11px;font-weight:800;background:#e7f8f2;color:#08795d}.warn{background:#fff4dc;color:#8a5a00}.bad{background:#ffe8ed;color:#a42b43}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:11px;border-bottom:1px solid #edf1f7}th{font-size:10px;color:var(--muted);text-transform:uppercase}.table{overflow:auto}.loading,.empty{text-align:center;color:var(--muted);padding:45px 10px}
+@media(max-width:1050px){.summary{grid-template-columns:repeat(3,1fr)}.two,.three{grid-template-columns:1fr}}@media(max-width:700px){.page{width:92vw}.summary{grid-template-columns:repeat(2,1fr)}header{padding:20px}.actions{display:none}.bar{grid-template-columns:100px 1fr 30px}}
+</style>
+</head>
+<body>
+<div class="page">
+<header>
+ <div class="brand"><img src="department-emblem.png"><div><div class="ey">Secure Digital Document Management</div><h1 id="title">Department Analytics</h1><p class="sub" id="subtitle">Operational overview</p></div></div>
+ <div class="actions"><a class="btn" href="homepage.html">← Command Center</a><button class="btn" onclick="load()">↻ Refresh</button></div>
+</header>
+<div class="filters"><select id="range"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 3 months</option><option value="all">All available</option></select><span class="updated" id="updated">Loading…</span></div>
+<main id="app"><div class="card loading">Loading department analytics…</div></main>
+</div>
+<script>
+const API=(location.hostname==="localhost"||location.hostname==="127.0.0.1")?"http://127.0.0.1:8000":"https://alliance-cqnf.onrender.com";
+const token=sessionStorage.getItem("token");const H={Authorization:"Bearer "+token};
+if(!token)location.href="login.html?redirect=analytics.html";
+const type=(sessionStorage.getItem("department_type")||"").toLowerCase(),name=sessionStorage.getItem("department_name")||"Department";
+document.body.className=type.includes("forensic")||type.includes("fsl")?"forensic":type.includes("medical")||type.includes("hospital")?"medical":type.includes("legal")||type.includes("court")?"legal":"police";
+const labels={police:["Police Operations Analytics","Investigation, evidence and case activity"],forensic:["Forensic Operations Analytics","Evidence and report processing overview"],medical:["Medical Case Analytics","Case and document operations overview"],legal:["Legal Case Analytics","Case, document and access overview"]};
+const k=Object.keys(labels).find(x=>document.body.classList.contains(x))||"police";document.getElementById("title").textContent=labels[k][0];document.getElementById("subtitle").textContent=name+" · "+labels[k][1];
+function esc(v){return String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]))}
+async function api(p){let r=await fetch(API+p,{headers:H}),t=await r.text(),d={};try{d=t?JSON.parse(t):{}}catch{d={detail:t}}if(!r.ok)throw Error(d.detail||"Request failed");return d}
+function bars(a){let m=Math.max(1,...a.map(x=>x.v));return a.map(x=>`<div class="bar"><span>${esc(x.n)}</span><div class="track"><div class="fill" style="width:${Math.max(3,x.v/m*100)}%"></div></div><b>${x.v}</b></div>`).join("")}
+function within(c,n){if(n==="all")return c;let cut=Date.now()-n*864e5;return c.filter(x=>new Date(x.cases?.created_at||0).getTime()>=cut)}
+async function load(){
+document.getElementById("app").innerHTML='<div class="card loading">Refreshing analytics…</div>';
+try{
+let cases=await api("/case/my"), range=document.getElementById("range").value, rc=within(cases,range),docs=0,verified=0,invalid=0,members=0,processing=0,done=0,failed=0,types={};
+let results=await Promise.all(cases.map(async c=>{let id=encodeURIComponent(c.case_id),o={d:[],a:null,m:[]};try{o.d=(await api("/case/documents?case_id="+id)).documents||[]}catch{}try{o.a=await api("/case/ai/status?case_id="+id)}catch{}try{o.m=(await api("/case/members?case_id="+id)).members||[]}catch{}return o}));
+results.forEach(o=>{docs+=o.d.length;members+=o.m.length;o.d.forEach(d=>{types[d.document_type]=(types[d.document_type]||0)+1;if(d.integrity_verified===false||d.verification_status==="invalid")invalid++;else verified++});if(o.a){let jobs=o.a.jobs||o.a.documents||[];jobs.forEach(j=>{let s=(j.status||"").toLowerCase();if(s==="processing"||s==="queued")processing++;else if(s==="completed")done++;else if(s==="failed")failed++})}});
+let open=cases.filter(x=>(x.cases?.status||"").toLowerCase()==="open").length,closed=cases.filter(x=>["closed","completed","archived"].includes((x.cases?.status||"").toLowerCase())).length;
+let typesA=Object.entries(types).map(([n,v])=>({n:n.replaceAll("_"," "),v})).sort((a,b)=>b.v-a.v).slice(0,7);
+document.getElementById("app").innerHTML=`
+<section class="grid summary">
+<div class="card metric"><div class="ico">📁</div><div class="value">${open}</div><div class="label">Open cases</div><div class="note">${rc.length} created in selected period</div></div>
+<div class="card metric"><div class="ico">✓</div><div class="value">${closed}</div><div class="label">Closed / archived</div></div>
+<div class="card metric"><div class="ico">▤</div><div class="value">${docs}</div><div class="label">Document versions</div></div>
+<div class="card metric"><div class="ico">◉</div><div class="value">${processing}</div><div class="label">AI jobs processing</div></div>
+<div class="card metric"><div class="ico">♢</div><div class="value">${members}</div><div class="label">Case participants</div></div>
+</section>
+<section class="grid two" style="margin-top:16px">
+<div class="card"><h2>Case status</h2><p class="cs">Current status across your visible cases</p>${bars([{n:"Open",v:open},{n:"Closed",v:closed},{n:"Other",v:Math.max(0,cases.length-open-closed)}])}</div>
+<div class="card"><h2>AI processing health</h2><p class="cs">Operational processing state only</p>${bars([{n:"Completed",v:done},{n:"Processing",v:processing},{n:"Failed",v:failed}])}<div class="note">Document contents, hashes, model names and provider details are intentionally not shown.</div></div>
+</section>
+<section class="grid two" style="margin-top:16px">
+<div class="card"><h2>Document workload</h2><p class="cs">Document versions by type</p>${typesA.length?`<div class="bars">${bars(typesA)}</div>`:'<div class="empty">No documents available.</div>'}</div>
+<div class="card"><h2>Integrity</h2><p class="cs">Automatic document verification status</p><div class="row"><span>Verified documents</span><span class="badge">${verified}</span></div><div class="row"><span>Verification issues</span><span class="badge ${invalid?'bad':''}">${invalid}</span></div><div class="note">Cryptographic hashes remain hidden from the normal user interface.</div></div>
+</section>
+<section class="grid three" style="margin-top:16px">
+<div class="card"><h2>Access & collaboration</h2><p class="cs">Visible case participation</p><div class="row"><span>Participants</span><b>${members}</b></div><div class="row"><span>Cases</span><b>${cases.length}</b></div></div>
+<div class="card"><h2>Selected period</h2><p class="cs">Cases created during the selected range</p><div class="value">${rc.length}</div><div class="label">new cases</div></div>
+<div class="card"><h2>Operational health</h2><p class="cs">AI processing status</p><div class="row"><span>Completed</span><span class="badge">${done}</span></div><div class="row"><span>Needs attention</span><span class="badge ${failed?'bad':''}">${failed}</span></div></div>
+</section>
+<section class="card" style="margin-top:16px"><h2>Recent cases</h2><p class="cs">Human-readable references only</p><div class="table"><table><thead><tr><th>Case</th><th>Status</th><th>Created</th><th>Access</th></tr></thead><tbody>${cases.slice().sort((a,b)=>new Date(b.cases?.created_at||0)-new Date(a.cases?.created_at||0)).slice(0,8).map(c=>`<tr><td><b>${esc(c.cases?.fir_id||"Case")}</b></td><td><span class="badge">${esc(c.cases?.status||"")}</span></td><td>${c.cases?.created_at?new Date(c.cases.created_at).toLocaleString():"—"}</td><td>${esc(c.permission_level||"—")}</td></tr>`).join("")||'<tr><td colspan="4" class="empty">No cases available.</td></tr>'}</tbody></table></div></section>`;
+document.getElementById("updated").textContent="Updated "+new Date().toLocaleString();
+}catch(e){document.getElementById("app").innerHTML=`<div class="card"><h2>Analytics unavailable</h2><p class="cs">${esc(e.message)}</p><div class="note">Your case data is unchanged. Try Refresh again.</div></div>`;document.getElementById("updated").textContent="Unable to load"}}
+document.getElementById("range").onchange=load;load();
+</script>
+</body>
+</html>

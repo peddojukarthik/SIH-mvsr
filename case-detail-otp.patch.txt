@@ -1,0 +1,34 @@
+
+Your current case-detail.html already has the correct three buttons and
+the /security/request-otp + /security/verify-otp flow, as seen in the current
+uploaded file. Keep that file.
+
+CHANGE ONLY these purpose strings if you want them to match the new email OTP
+routes:
+
+VIEW FILES:
+  protectedAction('CASE_VIEW', showFiles)
+
+UPLOAD:
+  protectedAction('CASE_UPLOAD', showUpload)
+
+MEMBERS:
+  protectedAction('CASE_MEMBERS', showMembers)
+
+The current case-detail file already calls:
+  /case/documents?case_id=...
+  /documents/file/{version_id}
+  /documents/verify/{version_id}
+  /documents/upload
+  /case/members
+  /case/search-members
+  /case/invite
+
+Do NOT remove the server-side case membership checks.
+
+Also remove this obsolete text from the old case-detail page:
+  "To invite someone to this case, open invite-case.html..."
+
+The Members panel in the newer uploaded case-detail already contains the
+employee search + document checklist + permission selector and calls
+/case/invite. Therefore there is no reason to expose invite-case.html.
