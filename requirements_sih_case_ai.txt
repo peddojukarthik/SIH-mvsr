@@ -1,0 +1,15 @@
+# SIH Secure DMS - Case AI
+fastapi
+uvicorn[standard]
+supabase
+bcrypt
+pyotp
+python-dotenv
+cryptography
+reportlab
+pydantic
+python-multipart
+pillow
+pymupdf
+python-docx
+python-pptx
