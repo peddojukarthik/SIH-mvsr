@@ -44,6 +44,7 @@ load_dotenv()
 
 app = FastAPI(title="SIH Secure DMS")
 ALLOWED_ORIGINS = [
+    "https://sih-mvsr.vercel.app",
     "https://allaince.netlify.app",
     "http://localhost:5500",
     "http://127.0.0.1:5500",
@@ -70,7 +71,7 @@ RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "onboarding@resend.dev")
 # Email links must point to a real HTTP page.
 # For local development this is the backend's activate-page.
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "https://allaince.netlify.app")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://sih-mvsr.vercel.app")
 
 SESSION_LIFETIME_HOURS = 8
 ELEVATION_LIFETIME_MINUTES = 15
